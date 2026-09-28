@@ -63,6 +63,28 @@ enum DevTools {
             window.orderOut(nil)
             window.close()
         }
+        // HUD samples: switch number, error message, identify overlay.
+        if let monitor = ScreenRegistry.shared.monitors.first {
+            let samples: [(String, () -> Void)] = [
+                ("hud-number", { HUD.shared.showNumber(2, detail: "Safari", on: monitor) }),
+                ("hud-message", { HUD.shared.showMessage("3번 모니터가 없습니다. (연결된 모니터 2대)", on: monitor) }),
+                ("hud-identify", { HUD.shared.identify([monitor], duration: 3) }),
+            ]
+            for (name, show) in samples {
+                let before = Set(NSApp.windows.map(\.windowNumber))
+                show()
+                RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+                let panel = NSApp.windows.first { $0 is NSPanel && $0.isVisible && !before.contains($0.windowNumber) }
+                    ?? NSApp.windows.last { $0 is NSPanel && $0.isVisible }
+                guard let panel,
+                      let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(panel.windowNumber),
+                                                          [.boundsIgnoreFraming, .bestResolution]),
+                      let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { continue }
+                let url = directory.appendingPathComponent("\(name).png")
+                if (try? data.write(to: url)) != nil { written.append(url) }
+                panel.orderOut(nil)
+            }
+        }
         return written
     }
 }

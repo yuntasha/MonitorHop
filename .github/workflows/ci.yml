@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Build
+        run: swift build
+      - name: Unit tests
+        run: swift test
+      - name: Assemble app bundle (ad-hoc signed)
+        run: SIGN_IDENTITY=- ./scripts/build-app.sh
+      - name: CLI smoke test
+        run: |
+          build/MonitorHop.app/Contents/MacOS/MonitorHop --version
+          build/MonitorHop.app/Contents/MacOS/MonitorHop --help
+          if build/MonitorHop.app/Contents/MacOS/MonitorHop --bogus; then exit 1; fi
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: MonitorHop.app
+          path: build/MonitorHop.app
