@@ -50,7 +50,7 @@ final class ActionPerformer {
         } else {
             switch action.kind {
             case .focus: outcome = focusMonitor(action.slot)
-            case .move: outcome = moveFocusedWindow(toMonitor: action.slot)
+            case .move: outcome = moveFocusedWindow(toMonitor: action.slot, onlyPID: requiredFrontPID)
             }
         }
         switch outcome {
@@ -87,13 +87,27 @@ final class ActionPerformer {
         registry.refresh()
         guard let monitor = registry.monitor(number: number) else { return missingMonitor(number) }
 
-        let trusted = AccessibilityPermission.isTrusted
-        var windows = visibleWindows(on: monitor, includeOwn: !isCommandLine)
+        let windows = visibleWindows(on: monitor, includeOwn: !isCommandLine)
         if windows.isEmpty {
-            // Stage Manager briefly shows an empty stage while it swaps windows: look again.
-            usleep(150_000)
-            windows = visibleWindows(on: monitor, includeOwn: !isCommandLine)
+            if config.moveCursor { Cursor.warp(to: Geometry.center(of: monitor.axVisibleFrame)) }
+            HUD.shared.showNumber(number, detail: "열린 창 없음", on: monitor)
+            // Stage Manager briefly shows an empty stage while it swaps windows: look again
+            // shortly (without blocking) and focus the window if one appears.
+            if StageManager.isEnabled {
+                verification = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    let again = self.visibleWindows(on: monitor, includeOwn: !self.isCommandLine)
+                    if !again.isEmpty { _ = self.focus(again, on: monitor, number: number) }
+                }
+            }
+            return .done("\(number)번 모니터에 열린 창이 없어 커서만 옮겼습니다.")
         }
+        return focus(windows, on: monitor, number: number)
+    }
+
+    private func focus(_ windows: [WindowInfo], on monitor: Monitor, number: Int) -> ActionOutcome {
+        let trusted = AccessibilityPermission.isTrusted
 
         // MonitorHop's own window (Settings) in front: focus it with AppKit, never AX on ourselves.
         if let first = windows.first, first.pid == getpid() {
@@ -233,17 +247,21 @@ final class ActionPerformer {
 
     // MARK: - 2. Move the focused window to monitor N
 
-    func moveFocusedWindow(toMonitor number: Int) -> ActionOutcome {
+    /// - Parameter onlyPID: when set, only a window of that process is ever moved.
+    func moveFocusedWindow(toMonitor number: Int, onlyPID: pid_t? = nil) -> ActionOutcome {
         registry.refresh()
         guard let target = registry.monitor(number: number) else { return missingMonitor(number) }
 
-        if let own = ownFrontWindow() { return moveOwnWindow(own, to: target) }
+        if onlyPID == nil || onlyPID == getpid(), let own = ownFrontWindow() { return moveOwnWindow(own, to: target) }
 
         guard AccessibilityPermission.isTrusted else {
             if !isCommandLine { PermissionWindowController.shared.show() }
             return .failed("창을 옮기려면 접근성 권한이 필요합니다.")
         }
-        guard let window = focusedWindow() else { return .failed("옮길 창을 찾지 못했습니다.") }
+        guard let window = focusedWindow(onlyPID: onlyPID) else { return .failed("옮길 창을 찾지 못했습니다.") }
+        if let onlyPID, window.pid != onlyPID {
+            return .failed("지정한 앱(pid \(onlyPID))의 창이 아니어서 옮기지 않았습니다.")
+        }
         if window.isFullScreen { return .failed("전체 화면 창은 옮길 수 없습니다. 전체 화면을 먼저 끄세요.") }
         guard let frame = window.frame else { return .failed("창의 위치를 읽을 수 없습니다.") }
         guard window.canMove else { return .failed("이 창은 위치를 바꿀 수 없습니다.") }
@@ -274,13 +292,15 @@ final class ActionPerformer {
             }
             return .failed("앱이 창 이동을 허용하지 않았습니다.")
         }
-        // The app kept its own size (fixed width, minimum size…): place the real size as keepSize would.
+        // The app kept its own size (fixed width, minimum size, character grid…): center the real
+        // size where the requested frame would have been.
         if abs(final.width - desired.width) > 1 || abs(final.height - desired.height) > 1 {
-            let adjusted = Placement.targetFrame(
-                window: CGRect(origin: frame.origin, size: final.size),
-                source: source.axVisibleFrame, target: target.axVisibleFrame, mode: .keepSize
+            let adjusted = Placement.reposition(
+                CGRect(x: (desired.midX - final.width / 2).rounded(), y: (desired.midY - final.height / 2).rounded(),
+                       width: final.width, height: final.height),
+                into: target.axVisibleFrame
             )
-            if adjusted.size == final.size, adjusted.origin != final.origin {
+            if abs(adjusted.minX - final.minX) > 1 || abs(adjusted.minY - final.minY) > 1 {
                 window.setPosition(adjusted.origin)
                 final = window.frame ?? adjusted
             }
@@ -308,10 +328,22 @@ final class ActionPerformer {
         let bounds = monitor.axVisibleFrame.insetBy(dx: -1, dy: -1)
         let sticksOut = !bounds.contains(frame)
         if sticksOut {
+            let expected = window.canResize
+                ? Placement.clamp(frame, into: monitor.axVisibleFrame)
+                : Placement.reposition(frame, into: monitor.axVisibleFrame)
+            if Geometry.approximatelyEqual(expected, frame, tolerance: 1) {
+                // Larger than the screen and already as far in as it can go.
+                if config.moveCursor { warpCursor(into: frame, on: monitor) }
+                return .done("창이 화면보다 커서 더 옮길 수 없습니다.")
+            }
             if window.canResize {
-                final = window.setFrame(Placement.clamp(frame, into: monitor.axVisibleFrame)) ?? frame
+                final = window.setFrame(expected) ?? frame
             } else {
-                window.setPosition(Placement.reposition(frame, into: monitor.axVisibleFrame).origin)
+                window.setPosition(expected.origin)
+                final = window.frame ?? frame
+            }
+            if Geometry.approximatelyEqual(final, frame, tolerance: 1) {
+                usleep(80_000) // apps that apply geometry asynchronously
                 final = window.frame ?? frame
             }
             if Geometry.approximatelyEqual(final, frame, tolerance: 1) {
@@ -340,9 +372,11 @@ final class ActionPerformer {
         Cursor.warp(to: point)
     }
 
-    /// The window that currently has keyboard focus (in another app).
-    private func focusedWindow() -> AXWindow? {
-        if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() {
+    /// The window that currently has keyboard focus (in another app). With `onlyPID`, only that
+    /// process's windows are considered and there is no system-wide fallback.
+    private func focusedWindow(onlyPID: pid_t? = nil) -> AXWindow? {
+        if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid(),
+           onlyPID == nil || app.processIdentifier == onlyPID {
             let pid = app.processIdentifier
             if let window = AXWindow.focusedWindow(of: pid), window.frame != nil { return window }
             // Some apps do not report a focused window; use their front-most on-screen window.
@@ -354,7 +388,7 @@ final class ActionPerformer {
                 }
             }
         }
-        return AXWindow.systemFocusedWindow()
+        return onlyPID == nil ? AXWindow.systemFocusedWindow() : nil
     }
 
     // MARK: Own windows (e.g. the settings window) — moved with AppKit, never via AX on ourselves.

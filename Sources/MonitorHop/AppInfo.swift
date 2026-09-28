@@ -16,6 +16,15 @@ enum AppInfo {
     /// True when running from the assembled MonitorHop.app bundle.
     static var isBundled: Bool { Bundle.main.bundleIdentifier == bundleID }
 
+    /// Modification time of the executable when this process started (identifies the build).
+    private(set) static var launchExecutableMTime: Double?
+
+    static func captureLaunchIdentity() {
+        guard let path = Bundle.main.executablePath,
+              let date = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date else { return }
+        launchExecutableMTime = date.timeIntervalSince1970
+    }
+
     /// Same preferences domain whether launched as an app, from the CLI inside the bundle,
     /// or via `swift run` during development.
     static let defaults: UserDefaults = {

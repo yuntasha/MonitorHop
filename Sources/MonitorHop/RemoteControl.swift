@@ -41,7 +41,9 @@ enum RemoteControl {
             let requestID = note.object as? String
             let key = note.userInfo?["action"] as? String
             let acceptBy = note.userInfo?["acceptBy"] as? Double
-            let requiredPID = (note.userInfo?["pid"] as? Int).map { pid_t($0) }
+            let rawPID = note.userInfo?["pid"]
+            let requiredPID = (rawPID as? Int).flatMap { pid_t(exactly: $0) }
+            let invalidPID = rawPID != nil && (requiredPID ?? 0) <= 0
             MainActor.assumeIsolated {
                 if let acceptBy, ProcessInfo.processInfo.systemUptime > acceptBy {
                     logger.info("Dropping expired remote request \(key ?? "?", privacy: .public)")
@@ -51,7 +53,7 @@ enum RemoteControl {
                     center.postNotificationName(performAccepted, object: requestID, userInfo: nil, deliverImmediately: true)
                 }
                 whenReady {
-                    let outcome = handle(key, requiredFrontPID: requiredPID)
+                    let outcome = invalidPID ? .failed("잘못된 pid입니다.") : handle(key, requiredFrontPID: requiredPID)
                     guard let requestID else { return }
                     center.postNotificationName(
                         performResult, object: requestID,
@@ -95,9 +97,11 @@ enum RemoteControl {
             return DevTools.pressShortcut(of: action)
         }
         if key.hasPrefix(setFramePrefix) {
-            let n = key.dropFirst(setFramePrefix.count).split(separator: " ").compactMap { Double($0) }
-            guard n.count == 5 else { return .failed("형식: <windowID> <x> <y> <w> <h>") }
-            return DevTools.setFrame(windowID: CGWindowID(n[0]), to: CGRect(x: n[1], y: n[2], width: n[3], height: n[4]))
+            guard DevTools.isEnabled else { return .failed("개발용 기능이 꺼져 있습니다.") }
+            guard let (id, frame) = parseFrameSpec(String(key.dropFirst(setFramePrefix.count))) else {
+                return .failed("형식: <windowID> <x> <y> <w> <h>")
+            }
+            return DevTools.setFrame(windowID: id, to: frame)
         }
         if key.hasPrefix(renderPrefix) {
             ScreenRegistry.shared.refresh()
@@ -171,6 +175,15 @@ enum RemoteControl {
         DistributedNotificationCenter.default().postNotificationName(
             showSettingsRequest, object: nil, userInfo: nil, deliverImmediately: true
         )
+    }
+
+    /// "<windowID> <x> <y> <w> <h>" with an integer id and finite numbers (never traps).
+    static func parseFrameSpec(_ text: String) -> (CGWindowID, CGRect)? {
+        let parts = text.split(separator: " ")
+        guard parts.count == 5, let id = UInt32(parts[0]), id > 0 else { return nil }
+        let numbers = parts.dropFirst().compactMap { Double($0) }
+        guard numbers.count == 4, numbers.allSatisfy(\.isFinite), numbers[2] > 0, numbers[3] > 0 else { return nil }
+        return (id, CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3]))
     }
 
     /// "focus.2" / "move.10" — any positive monitor number (the menu allows more than 9).

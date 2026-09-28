@@ -32,9 +32,9 @@ enum CLI {
 
     개발용:
       --simulate-hotkey focus.N|move.N   실행 중인 앱이 그 단축키를 실제로 누르게 함 (등록된 단축키만)
-      --render-settings DIR              설정 화면의 각 탭을 DIR/settings-*.png로 저장
       --set-frame ID X Y W H             창(CGWindowID)의 위치·크기 지정 (AX 좌표, 테스트 복구용)
-      개발용 명령은 앱을 MONITORHOP_DEVTOOLS=1 환경으로 실행했을 때만 동작합니다.
+        위 두 명령은 앱을 MONITORHOP_DEVTOOLS=1 환경으로 실행했을 때만 동작합니다.
+      --render-settings DIR              설정 화면의 각 탭과 HUD를 DIR에 PNG로 저장 (앱 없이 동작)
 
     앱이 실행 중이면 --focus / --move 는 앱에 전달되어 앱의 접근성 권한으로 실행됩니다.
     """
@@ -87,7 +87,7 @@ enum CLI {
             }
             return .simulateHotkey(args[1])
         case "--set-frame":
-            guard args.count == 6, args.dropFirst().allSatisfy({ Double($0) != nil }) else {
+            guard args.count == 6, RemoteControl.parseFrameSpec(args.dropFirst().joined(separator: " ")) != nil else {
                 return .invalid("--set-frame 뒤에 창 ID와 X Y W H가 필요합니다.")
             }
             return .setFrame(Array(args.dropFirst()))
@@ -276,10 +276,8 @@ enum CLI {
             payload["bundlePath"] = Bundle.main.bundlePath
             payload["build"] = AppInfo.build
             payload["devTools"] = DevTools.isEnabled
-            if let url = Bundle.main.executableURL,
-               let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
-                payload["executableMTime"] = date.timeIntervalSince1970
-            }
+            // Captured at launch: re-reading the file now would report a rebuilt binary.
+            if let mtime = AppInfo.launchExecutableMTime { payload["executableMTime"] = mtime }
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
               let text = String(data: data, encoding: .utf8) else { return "{}" }

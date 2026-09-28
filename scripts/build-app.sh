@@ -27,8 +27,22 @@ swift build -c "$CONFIG" --product "$APP_NAME"
 BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
 
 # A copy of this bundle that is already running keeps executing the old code: restart it after
-# the build so commands forwarded by the CLI reach the new code.
-RUNNING_PIDS="$(pgrep -f "^$APP/Contents/MacOS/$APP_NAME\$" || true)"
+# the build so commands forwarded by the CLI reach the new code. Processes are matched by their
+# exact executable path (no regex, symlinks resolved); dev mode is preserved.
+mkdir -p "$ROOT/build"
+EXEC_REAL="$(cd "$ROOT/build" && pwd -P)/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+running_pids() {
+    local pid
+    for pid in $(pgrep -x "$APP_NAME" || true); do
+        [ "$(ps -o comm= -p "$pid" 2>/dev/null)" = "$EXEC_REAL" ] && echo "$pid"
+    done
+    return 0
+}
+RUNNING_PIDS="$(running_pids)"
+RESTART_DEVTOOLS=0
+for pid in $RUNNING_PIDS; do
+    ps -Eww -o command= -p "$pid" 2>/dev/null | grep -q "MONITORHOP_DEVTOOLS=1" && RESTART_DEVTOOLS=1
+done
 
 echo "==> assembling $APP"
 rm -rf "$APP"
@@ -62,9 +76,14 @@ codesign --verify --strict --verbose=1 "$APP"
 
 if [ -n "$RUNNING_PIDS" ]; then
     echo "==> restarting the running build/ instance"
+    # shellcheck disable=SC2086
     kill $RUNNING_PIDS 2>/dev/null || true
-    for _ in $(seq 1 20); do pgrep -f "^$APP/Contents/MacOS/$APP_NAME\$" >/dev/null || break; sleep 0.1; done
-    open "$APP"
+    for _ in $(seq 1 30); do [ -z "$(running_pids)" ] && break; sleep 0.1; done
+    if [ "$RESTART_DEVTOOLS" = 1 ]; then
+        open --env MONITORHOP_DEVTOOLS=1 "$APP"
+    else
+        open "$APP"
+    fi
 fi
 
 echo "==> done: $APP ($VERSION build $BUILD_NUMBER)"

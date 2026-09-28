@@ -10,6 +10,7 @@ Needs >= 2 monitors and Accessibility permission for MonitorHop. Restores settin
 
 Usage: scripts/integration-test.py   (after `make app`)
 """
+import atexit
 import json
 import os
 import plistlib
@@ -23,7 +24,10 @@ APP = os.path.join(ROOT, "build", "MonitorHop.app")
 TOOLS = os.path.join(ROOT, "build", "test-tools")
 BUNDLE_ID = "com.alencup.MonitorHop"
 WORK = tempfile.mkdtemp(prefix="monitorhop-it-")
-STATUS = os.path.join(WORK, "status.json")
+# One test-window process per monitor: Stage Manager keeps each app's windows together, so a single
+# app with a window on each monitor would get its windows reshuffled between stages.
+STATUS_B = os.path.join(WORK, "status-b.json")  # process with window HopB on monitor 1
+STATUS_A = os.path.join(WORK, "status-a.json")  # process with window HopA on monitor 2
 
 passed, failed = [], []
 
@@ -78,42 +82,58 @@ def app_under_test_running(info):
     if not info or not info.get("appRunning"):
         return False
     same_bundle = os.path.realpath(info.get("bundlePath", "")) == os.path.realpath(APP)
+    # executableMTime is captured when the app starts: older than the binary = stale process.
     fresh = info.get("executableMTime", 0) >= os.path.getmtime(BIN) - 1
     return same_bundle and fresh and info.get("devTools", False)
 
 
+def running_bundles():
+    """Bundle paths of running MonitorHop processes, read from the process table."""
+    bundles = []
+    for pid in subprocess.run(["pgrep", "-x", "MonitorHop"], capture_output=True, text=True).stdout.split():
+        exe = subprocess.run(["ps", "-o", "comm=", "-p", pid], capture_output=True, text=True).stdout.strip()
+        if "/Contents/MacOS/" in exe:
+            bundles.append(exe.split("/Contents/MacOS/")[0])
+    return bundles
+
+
+_restore = {"done": False, "launched": False, "previous": []}
+
+
+def restore_app():
+    """Quit the instance the test launched and relaunch what the user had running (once)."""
+    if _restore["done"]:
+        return
+    _restore["done"] = True
+    if _restore["launched"]:
+        subprocess.run(["pkill", "-x", "MonitorHop"])
+        time.sleep(0.8)
+    for bundle in _restore["previous"]:
+        subprocess.run(["open", bundle])
+
+
 def ensure_app_running():
-    """Makes sure the app under test is the one answering. Returns the bundle path of a
-    different MonitorHop that was running before (to relaunch afterwards), or "" if none."""
-    info = list_json()
-    if app_under_test_running(info):
-        return ""
-    running = bool(info and info.get("appRunning")) or subprocess.run(["pgrep", "-x", "MonitorHop"],
-                                                                       capture_output=True).returncode == 0
-    # An older build may not report its path: relaunch build/ afterwards in that case.
-    previous = ((info or {}).get("bundlePath") or APP) if running else ""
-    if running:
+    """Makes sure the app under test (fresh build/, dev tools on) is the one answering.
+    Whatever MonitorHop was running before is restored at exit, even on SKIP or Ctrl+C."""
+    if app_under_test_running(list_json()):
+        return
+    previous = running_bundles()
+    _restore["previous"] = previous
+    atexit.register(restore_app)
+    if previous:
         subprocess.run(["pkill", "-x", "MonitorHop"])
         for _ in range(50):
             time.sleep(0.1)
-            if not (list_json() or {}).get("appRunning"):
+            if not running_bundles():
                 break
+    _restore["launched"] = True
     # Dev tools (--simulate-hotkey) are opt-in per launch.
     subprocess.run(["open", "--env", "MONITORHOP_DEVTOOLS=1", APP], check=True)
     for _ in range(100):
         time.sleep(0.2)
         if app_under_test_running(list_json()):
-            return previous or APP
+            return
     sys.exit("could not start build/MonitorHop.app")
-
-
-def restore_app(previous):
-    """Relaunch whatever MonitorHop the user had running (without dev tools)."""
-    if not previous:
-        return
-    subprocess.run(["pkill", "-x", "MonitorHop"])
-    time.sleep(0.8)
-    subprocess.run(["open", previous])
 
 
 def visible_frames():
@@ -127,9 +147,24 @@ def hop_state():
 
 
 def window_status(wait=0.6):
+    """Merged status of both test processes: active process, its key window, frames, ids, pids."""
     time.sleep(wait)
-    with open(STATUS) as f:
-        return json.load(f)
+    merged = {"active": False, "key": "", "frames": {}, "ids": {}, "pids": {}, "keyPID": 0}
+    for path in (STATUS_B, STATUS_A):
+        try:
+            with open(path) as f:
+                st = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        merged["frames"].update(st["frames"])
+        merged["ids"].update(st["ids"])
+        for title in st["frames"]:
+            merged["pids"][title] = st["pid"]
+        if st["active"]:
+            merged["active"] = True
+            merged["key"] = st["key"]
+            merged["keyPID"] = st["pid"]
+    return merged
 
 
 def inside(rect, bounds, tol=1.0):
@@ -195,9 +230,9 @@ def restore_config(original):
 def main():
     if not os.path.isdir(APP):
         sys.exit("build/MonitorHop.app not found — run `make app` first")
-    previous_app = ensure_app_running()
-    info = list_json()
-    monitors = info["monitors"]
+    ensure_app_running()
+    info = list_json() or {}
+    monitors = info.get("monitors", [])
     print(f"MonitorHop {info['version']} · monitors: {len(monitors)} · app accessibility: {info.get('appTrusted')}")
     if len(monitors) < 2:
         sys.exit("SKIP: needs at least two monitors")
@@ -215,10 +250,11 @@ def main():
     original_config = read_config()
     try:
         write_placement(original_config, "keepSize")
-        subprocess.run(["open", "-n", test_app, "--args", STATUS,
-                        "HopB", *map(str, frame_b), "HopA", *map(str, frame_a)], check=True)
+        subprocess.run(["open", "-n", test_app, "--args", STATUS_B, "HopB", *map(str, frame_b)], check=True)
+        time.sleep(1.0)
+        subprocess.run(["open", "-n", test_app, "--args", STATUS_A, "HopA", *map(str, frame_a)], check=True)
         for _ in range(50):
-            if os.path.exists(STATUS):
+            if os.path.exists(STATUS_A) and os.path.exists(STATUS_B):
                 break
             time.sleep(0.1)
         s = window_status(2.0)  # let Stage Manager / the window server settle
@@ -239,9 +275,9 @@ def main():
                 check(label + " → cursor only", point_in(st["cursor"], monitor["axFrame"]), f"{out.strip()} / {st}")
                 return
             ok = st["frontmostPID"] == expected["pid"]
-            if expected["pid"] == s["pid"]:
+            if expected["pid"] in s["pids"].values():
                 key_id = s["ids"].get(s["key"], -1)
-                ok = ok and s["active"] and key_id == expected["id"]
+                ok = ok and s["active"] and s["keyPID"] == expected["pid"] and key_id == expected["id"]
                 if before_key and s["key"] != before_key:
                     same_app_switches += 1
             check(label, ok, f"{out.strip()} / expected {expected} / status {s} / state {st}")
@@ -249,8 +285,7 @@ def main():
 
         for n, monitor in ((2, m2), (1, m1), (2, m2), (1, m1), (2, m2)):
             focus_and_check(n, monitor)
-        print(f"  info  window-level switches inside the test app: {same_app_switches}"
-              + ("" if same_app_switches else " (Stage Manager kept only one test window on stage)"))
+        print(f"  info  switches between the two test windows: {same_app_switches}")
         print("\n[real hotkeys]")
         # The app presses its own registered shortcut: window server → Carbon hotkey → action.
         # Checked at app + cursor level: window-level precision is covered by [focus] above, and
@@ -268,12 +303,10 @@ def main():
             if s["key"] == "HopA" and s["active"]:
                 break
             # Make sure HopA is the focused window for the move tests.
-            subprocess.run(["open", test_app], check=True)  # re-activates the running test app
-            time.sleep(0.8)
             mh("--focus", "2")
             s = window_status(1.0)
         check("HopA focused before move tests", s["key"] == "HopA" and s["active"], s)
-        test_pid = str(s["pid"])
+        test_pid = str(s["pids"].get("HopA", 0))
 
         def move(n):
             # --pid: MonitorHop refuses to act unless the test app is frontmost, so a Stage
@@ -339,7 +372,7 @@ def main():
     finally:
         subprocess.run(["pkill", "-f", "MonitorHopTestWindow.app/Contents/MacOS/MonitorHopTestWindow"])
         restore_config(original_config)
-        restore_app(previous_app)
+        restore_app()
         if original_front:
             subprocess.run([os.path.join(TOOLS, "hoptool"), "activate", original_front])
 

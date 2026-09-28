@@ -86,12 +86,14 @@ scripts/integration-test.py   # 실제 창으로 포커스·이동·실제 단�
 통합 테스트는 build/ 의 최신 앱을 개발 모드(`MONITORHOP_DEVTOOLS=1`)로 띄워 검사하고, 끝나면 원래 실행 중이던 앱을 다시 켭니다.
 테스트가 옮기는 창은 항상 테스트용 창뿐입니다 (`--move … --pid`).
 
-개발용 명령 (앱을 `open --env MONITORHOP_DEVTOOLS=1 build/MonitorHop.app`으로 실행했을 때만 동작):
+개발용 명령:
 
 ```bash
+# 앱을 `open --env MONITORHOP_DEVTOOLS=1 build/MonitorHop.app`으로 실행했을 때만 동작
 $MH --simulate-hotkey focus.2      # 앱이 자기 단축키를 실제로 눌러 봄 (창 서버 → Carbon → 동작)
-$MH --render-settings /tmp/shots   # 설정 창 각 탭과 HUD를 PNG로 저장 (화면 점검용)
 $MH --set-frame ID X Y W H         # 창 위치·크기 지정 (테스트 복구용)
+# 앱 없이 CLI 프로세스 안에서 동작
+$MH --render-settings /tmp/shots   # 설정 창 각 탭과 HUD를 PNG로 저장 (화면 점검용)
 ```
 
 CI(GitHub Actions, macOS 15)는 푸시마다 빌드 · 단위 테스트 · 앱 조립 · CLI 확인을 실행합니다.
