@@ -45,7 +45,8 @@ struct AppConfigTests {
 
         let json = """
         {"placement": "bogus", "moveCursor": false, "extra": 1,
-         "bindings": {"focus.1": {"keyCode": 18, "modifiers": 4}, "bogus.x": {"keyCode": 1, "modifiers": 1}}}
+         "bindings": {"focus.1": {"keyCode": 18, "modifiers": 4}, "bogus.x": {"keyCode": 1, "modifiers": 1},
+                      "move.1": {"keyCode": 13, "modifiers": 1}}}
         """
         let decoded = try JSONDecoder().decode(AppConfig.self, from: Data(json.utf8))
         #expect(decoded.placement == AppConfig.default.placement)

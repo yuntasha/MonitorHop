@@ -9,7 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainMenu.install()
-        RemoteControl.startListening()
 
         ScreenRegistry.shared.start()
 
@@ -34,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !AccessibilityPermission.isTrusted {
             PermissionWindowController.shared.show()
         }
+        RemoteControl.markReady()
         logger.info("MonitorHop \(AppInfo.version, privacy: .public) started, \(hotkeys.registeredCount) hotkeys")
     }
 

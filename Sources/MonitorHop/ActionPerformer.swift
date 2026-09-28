@@ -36,16 +36,22 @@ final class ActionPerformer {
     /// Set by the CLI: never open windows, just report.
     var isCommandLine = false
 
+    /// - Parameter requiredFrontPID: when set, the action only runs while that process is the
+    ///   frontmost app (scripts use it so they never move some other app's window by accident).
     @discardableResult
-    func perform(_ action: ActionID) -> ActionOutcome {
+    func perform(_ action: ActionID, requiredFrontPID: pid_t? = nil) -> ActionOutcome {
         // A new action supersedes the focus check of the previous one.
         verification?.cancel()
         verification = nil
 
         let outcome: ActionOutcome
-        switch action.kind {
-        case .focus: outcome = focusMonitor(action.slot)
-        case .move: outcome = moveFocusedWindow(toMonitor: action.slot)
+        if let requiredFrontPID, NSWorkspace.shared.frontmostApplication?.processIdentifier != requiredFrontPID {
+            outcome = .failed("지정한 앱(pid \(requiredFrontPID))이 맨 앞에 있지 않아 실행하지 않았습니다.")
+        } else {
+            switch action.kind {
+            case .focus: outcome = focusMonitor(action.slot)
+            case .move: outcome = moveFocusedWindow(toMonitor: action.slot)
+            }
         }
         switch outcome {
         case .done(let message):
@@ -82,7 +88,12 @@ final class ActionPerformer {
         guard let monitor = registry.monitor(number: number) else { return missingMonitor(number) }
 
         let trusted = AccessibilityPermission.isTrusted
-        let windows = visibleWindows(on: monitor, includeOwn: !isCommandLine)
+        var windows = visibleWindows(on: monitor, includeOwn: !isCommandLine)
+        if windows.isEmpty {
+            // Stage Manager briefly shows an empty stage while it swaps windows: look again.
+            usleep(150_000)
+            windows = visibleWindows(on: monitor, includeOwn: !isCommandLine)
+        }
 
         // MonitorHop's own window (Settings) in front: focus it with AppKit, never AX on ourselves.
         if let first = windows.first, first.pid == getpid() {
@@ -165,6 +176,8 @@ final class ActionPerformer {
     /// Layered activation: every step is best effort, later steps cover failures of earlier ones.
     private func activate(_ target: FocusTarget) {
         target.window?.becomeMain()                     // make it the app's main/key window
+        // Even when the app is already frontmost, re-activating it (front window only) is what
+        // actually hands keyboard focus to the new main window; AXMain + AXRaise alone does not.
         let broughtToFront = AppActivator.bringToFront(pid: target.pid) // activate app, front window only
         target.window?.raise()                          // put the chosen window on top
         if !broughtToFront { AppActivator.activateFallback(pid: target.pid) }
@@ -176,14 +189,17 @@ final class ActionPerformer {
     private func verifyFocus(_ target: FocusTarget, previousFront: pid_t?, staleWindowID: CGWindowID?, on monitor: Monitor) {
         verification?.cancel()
         verification = Task { @MainActor [weak self] in
+            var reachedTarget = false
             for delay: UInt64 in [150, 150, 200] {
                 try? await Task.sleep(nanoseconds: delay * 1_000_000)
                 guard !Task.isCancelled, let self else { return }
 
                 let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                if front == target.pid { reachedTarget = true }
                 if front != target.pid {
-                    // Activation did not happen yet. Retry only if the old app is still in front.
-                    guard front == previousFront else { return }
+                    // Activation did not happen yet. Retry only if the target never became
+                    // frontmost and the old app is still in front (otherwise the user switched).
+                    guard !reachedTarget, front == previousFront else { return }
                     logger.info("Focus check: app not frontmost yet, retrying")
                     target.window?.becomeMain()
                     if !AppActivator.bringToFront(pid: target.pid) { AppActivator.activateFallback(pid: target.pid) }
@@ -237,8 +253,12 @@ final class ActionPerformer {
             return pullIntoMonitor(window, frame: frame, monitor: target, number: number)
         }
 
+        // Fixed-size windows cannot fill or scale: keep their size and relative position.
+        let resizable = window.canResize
+        var mode = config.placement
+        if !resizable, mode == .fill || mode == .proportional { mode = .keepSize }
         let desired = Placement.targetFrame(
-            window: frame, source: source.axVisibleFrame, target: target.axVisibleFrame, mode: config.placement
+            window: frame, source: source.axVisibleFrame, target: target.axVisibleFrame, mode: mode
         )
         var actual = window.setFrame(desired)
         if !landed(actual, on: target) {
@@ -253,6 +273,17 @@ final class ActionPerformer {
                 window.setFrame(frame)
             }
             return .failed("앱이 창 이동을 허용하지 않았습니다.")
+        }
+        // The app kept its own size (fixed width, minimum size…): place the real size as keepSize would.
+        if abs(final.width - desired.width) > 1 || abs(final.height - desired.height) > 1 {
+            let adjusted = Placement.targetFrame(
+                window: CGRect(origin: frame.origin, size: final.size),
+                source: source.axVisibleFrame, target: target.axVisibleFrame, mode: .keepSize
+            )
+            if adjusted.size == final.size, adjusted.origin != final.origin {
+                window.setPosition(adjusted.origin)
+                final = window.frame ?? adjusted
+            }
         }
         // Windows with a minimum size larger than the target area: keep them on screen.
         if !target.axVisibleFrame.insetBy(dx: -1, dy: -1).contains(final) {
@@ -274,13 +305,21 @@ final class ActionPerformer {
     /// "Move to the monitor it is already on": pull a window that sticks out fully onto it.
     private func pullIntoMonitor(_ window: AXWindow, frame: CGRect, monitor: Monitor, number: Int) -> ActionOutcome {
         var final = frame
-        let sticksOut = !monitor.axVisibleFrame.insetBy(dx: -1, dy: -1).contains(frame)
+        let bounds = monitor.axVisibleFrame.insetBy(dx: -1, dy: -1)
+        let sticksOut = !bounds.contains(frame)
         if sticksOut {
             if window.canResize {
                 final = window.setFrame(Placement.clamp(frame, into: monitor.axVisibleFrame)) ?? frame
             } else {
                 window.setPosition(Placement.reposition(frame, into: monitor.axVisibleFrame).origin)
                 final = window.frame ?? frame
+            }
+            if Geometry.approximatelyEqual(final, frame, tolerance: 1) {
+                return .failed("앱이 창 이동을 허용하지 않았습니다.")
+            }
+            if !bounds.contains(final) {
+                if config.moveCursor { warpCursor(into: final, on: monitor) }
+                return .done("창이 화면보다 커서 일부만 \(number)번 모니터 안으로 옮겼습니다.")
             }
         }
         if config.moveCursor { warpCursor(into: final, on: monitor) }

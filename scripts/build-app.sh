@@ -26,6 +26,10 @@ echo "==> swift build ($CONFIG)"
 swift build -c "$CONFIG" --product "$APP_NAME"
 BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
 
+# A copy of this bundle that is already running keeps executing the old code: restart it after
+# the build so commands forwarded by the CLI reach the new code.
+RUNNING_PIDS="$(pgrep -f "^$APP/Contents/MacOS/$APP_NAME\$" || true)"
+
 echo "==> assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -55,5 +59,12 @@ else
 fi
 codesign -d -r- "$APP" 2>&1 | sed -n 's/^designated => /    requirement: /p'
 codesign --verify --strict --verbose=1 "$APP"
+
+if [ -n "$RUNNING_PIDS" ]; then
+    echo "==> restarting the running build/ instance"
+    kill $RUNNING_PIDS 2>/dev/null || true
+    for _ in $(seq 1 20); do pgrep -f "^$APP/Contents/MacOS/$APP_NAME\$" >/dev/null || break; sleep 0.1; done
+    open "$APP"
+fi
 
 echo "==> done: $APP ($VERSION build $BUILD_NUMBER)"

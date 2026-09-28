@@ -65,16 +65,55 @@ def mh(*args):
     return r.stdout + r.stderr
 
 
-def ensure_app_running():
-    """Returns True when this test started the app (so it can quit it afterwards)."""
-    if json.loads(mh("--list-json"))["appRunning"]:
+def list_json():
+    """--list-json, or None while the app is starting and not answering yet."""
+    try:
+        return json.loads(mh("--list-json"))
+    except json.JSONDecodeError:
+        return None
+
+
+def app_under_test_running(info):
+    """True when the running app is exactly build/MonitorHop.app, current, with dev tools on."""
+    if not info or not info.get("appRunning"):
         return False
-    subprocess.run(["open", APP], check=True)
-    for _ in range(50):
+    same_bundle = os.path.realpath(info.get("bundlePath", "")) == os.path.realpath(APP)
+    fresh = info.get("executableMTime", 0) >= os.path.getmtime(BIN) - 1
+    return same_bundle and fresh and info.get("devTools", False)
+
+
+def ensure_app_running():
+    """Makes sure the app under test is the one answering. Returns the bundle path of a
+    different MonitorHop that was running before (to relaunch afterwards), or "" if none."""
+    info = list_json()
+    if app_under_test_running(info):
+        return ""
+    running = bool(info and info.get("appRunning")) or subprocess.run(["pgrep", "-x", "MonitorHop"],
+                                                                       capture_output=True).returncode == 0
+    # An older build may not report its path: relaunch build/ afterwards in that case.
+    previous = ((info or {}).get("bundlePath") or APP) if running else ""
+    if running:
+        subprocess.run(["pkill", "-x", "MonitorHop"])
+        for _ in range(50):
+            time.sleep(0.1)
+            if not (list_json() or {}).get("appRunning"):
+                break
+    # Dev tools (--simulate-hotkey) are opt-in per launch.
+    subprocess.run(["open", "--env", "MONITORHOP_DEVTOOLS=1", APP], check=True)
+    for _ in range(100):
         time.sleep(0.2)
-        if json.loads(mh("--list-json"))["appRunning"]:
-            return True
+        if app_under_test_running(list_json()):
+            return previous or APP
     sys.exit("could not start build/MonitorHop.app")
+
+
+def restore_app(previous):
+    """Relaunch whatever MonitorHop the user had running (without dev tools)."""
+    if not previous:
+        return
+    subprocess.run(["pkill", "-x", "MonitorHop"])
+    time.sleep(0.8)
+    subprocess.run(["open", previous])
 
 
 def visible_frames():
@@ -156,8 +195,8 @@ def restore_config(original):
 def main():
     if not os.path.isdir(APP):
         sys.exit("build/MonitorHop.app not found — run `make app` first")
-    started_app = ensure_app_running()
-    info = json.loads(mh("--list-json"))
+    previous_app = ensure_app_running()
+    info = list_json()
     monitors = info["monitors"]
     print(f"MonitorHop {info['version']} · monitors: {len(monitors)} · app accessibility: {info.get('appTrusted')}")
     if len(monitors) < 2:
@@ -214,29 +253,39 @@ def main():
               + ("" if same_app_switches else " (Stage Manager kept only one test window on stage)"))
         print("\n[real hotkeys]")
         # The app presses its own registered shortcut: window server → Carbon hotkey → action.
+        # Checked at app + cursor level: window-level precision is covered by [focus] above, and
+        # with Stage Manager the stage of a monitor may be reshuffled right after activation.
         for n, monitor in ((1, m1), (2, m2)):
             expected = json.loads(run(os.path.join(TOOLS, "hoptool"), "front", *map(str, monitor["axFrame"])))
             out = mh("--simulate-hotkey", f"focus.{n}")
-            s, st = window_status(0.8), hop_state()
-            ok = bool(expected) and st["frontmostPID"] == expected["pid"]
-            if ok and expected["pid"] == s["pid"]:
-                ok = s["ids"].get(s["key"], -1) == expected["id"]
-            check(f"hotkey focus.{n} → front window on monitor {n}", ok, f"{out.strip()} / expected {expected} / {s}")
+            st = hop_state() if not time.sleep(0.8) else None
+            ok = bool(expected) and st["frontmostPID"] == expected["pid"] and point_in(st["cursor"], monitor["axFrame"])
+            check(f"hotkey focus.{n} → {expected.get('owner', '?')} active, cursor on monitor {n}", ok,
+                  f"{out.strip()} / expected {expected} / state {st}")
 
         s = window_status()
-        if s["key"] != "HopA":
+        for _ in range(3):
+            if s["key"] == "HopA" and s["active"]:
+                break
             # Make sure HopA is the focused window for the move tests.
             subprocess.run(["open", test_app], check=True)  # re-activates the running test app
+            time.sleep(0.8)
             mh("--focus", "2")
-            s = window_status()
+            s = window_status(1.0)
         check("HopA focused before move tests", s["key"] == "HopA" and s["active"], s)
+        test_pid = str(s["pid"])
+
+        def move(n):
+            # --pid: MonitorHop refuses to act unless the test app is frontmost, so a Stage
+            # Manager reshuffle can never make this test move one of the user's windows.
+            return mh("--move", str(n), "--pid", test_pid)
 
         out = mh("--focus", "9")
         check("focus 9 (missing monitor) reports failure", "실패" in out, out)
 
         print("\n[move · keepSize]")
         frame_a = window_status(0.1)["frames"]["HopA"]
-        out = mh("--move", "1")
+        out = move(1)
         s, st = window_status(), hop_state()
         v1, v2 = visible_frames()
         fa = s["frames"]["HopA"]
@@ -245,20 +294,20 @@ def main():
         check("move 1 → HopA still key", s["key"] == "HopA" and s["active"], s)
         check("move 1 → cursor followed", point_in(st["cursor"], m1["axFrame"]), st)
 
-        out = mh("--move", "1")
+        out = move(1)
         check("move to the same monitor is a no-op", "이미" in out, out)
 
-        out = mh("--move", "2")
+        out = move(2)
         fa = window_status()["frames"]["HopA"]
         check("move 2 → back to the original frame", close(fa, frame_a, 3), f"{fa} vs {frame_a}")
 
         print("\n[move · fill]")
         write_placement(original_config, "fill")
-        mh("--move", "1")
+        move(1)
         fa = window_status()["frames"]["HopA"]
         v1, v2 = visible_frames()
         check("fill → matches monitor 1 visible area", close(fa, v1, 2), f"{fa} vs {v1}")
-        mh("--move", "2")
+        move(2)
         fa = window_status()["frames"]["HopA"]
         v1, v2 = visible_frames()
         check("fill → matches monitor 2 visible area", close(fa, v2, 2), f"{fa} vs {v2}")
@@ -266,7 +315,7 @@ def main():
         print("\n[move · center]")
         write_placement(original_config, "center")
         before = window_status(0.1)["frames"]["HopA"]
-        mh("--move", "1")
+        move(1)
         fa = window_status()["frames"]["HopA"]
         v1, v2 = visible_frames()
         expected = centered(before[2:], v1)
@@ -276,11 +325,11 @@ def main():
         write_placement(original_config, "proportional")
         # Shrink HopA to a known non-maximized frame first (keepSize keeps it, center re-centers it).
         write_placement(original_config, "keepSize")
-        mh("--move", "2")
+        move(2)
         write_placement(original_config, "proportional")
         before = window_status()["frames"]["HopA"]
         v1, v2 = visible_frames()
-        mh("--move", "1")
+        move(1)
         after = window_status()["frames"]["HopA"]
         v1b, _ = visible_frames()
         maximized = close(before, v2, 16)
@@ -290,8 +339,7 @@ def main():
     finally:
         subprocess.run(["pkill", "-f", "MonitorHopTestWindow.app/Contents/MacOS/MonitorHopTestWindow"])
         restore_config(original_config)
-        if started_app:
-            subprocess.run(["pkill", "-x", "MonitorHop"])
+        restore_app(previous_app)
         if original_front:
             subprocess.run([os.path.join(TOOLS, "hoptool"), "activate", original_front])
 

@@ -37,8 +37,9 @@ struct ShortcutsSettingsView: View {
     @ObservedObject private var store = SettingsStore.shared
     @ObservedObject private var registry = ScreenRegistry.shared
     @State private var showAllSlots = false
-    /// Enabled macOS shortcuts, read once per render for the conflict markers.
-    private var systemShortcuts: [(keyCode: UInt32, modifiers: UInt32)] { SystemShortcuts.enabled() }
+    /// Enabled macOS shortcuts for the conflict markers; re-read when the window becomes key
+    /// (the user may have just changed them in System Settings) and when bindings change.
+    @State private var systemShortcuts = SystemShortcutList(SystemShortcuts.enabled())
 
     private var visibleSlots: [Int] {
         if showAllSlots { return Array(AppConfig.slots) }
@@ -48,7 +49,7 @@ struct ShortcutsSettingsView: View {
     }
 
     var body: some View {
-        let taken = systemShortcuts
+        let taken = systemShortcuts.items
         Form {
             Section {
                 Text("그 모니터에서 가장 앞에 있는 창을 활성화하고 커서를 옮깁니다.")
@@ -84,6 +85,21 @@ struct ShortcutsSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in
+            systemShortcuts = SystemShortcutList(SystemShortcuts.enabled())
+        }
+        .onReceive(store.$config.map(\.bindings).removeDuplicates()) { _ in
+            systemShortcuts = SystemShortcutList(SystemShortcuts.enabled())
+        }
+    }
+}
+
+/// Equatable wrapper so the list can live in @State.
+struct SystemShortcutList: Equatable {
+    let items: [(keyCode: UInt32, modifiers: UInt32)]
+    init(_ items: [(keyCode: UInt32, modifiers: UInt32)]) { self.items = items }
+    static func == (a: Self, b: Self) -> Bool {
+        a.items.count == b.items.count && zip(a.items, b.items).allSatisfy { $0.keyCode == $1.keyCode && $0.modifiers == $1.modifiers }
     }
 }
 
@@ -143,7 +159,8 @@ struct ShortcutRow: View {
         }
         .task(id: feedback) {
             guard feedback != nil else { return }
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            // A newer message cancels this task: it must not clear the new message.
+            do { try await Task.sleep(nanoseconds: 6_000_000_000) } catch { return }
             feedback = nil
         }
     }
@@ -419,13 +436,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// SwiftUI does not reliably send onDisappear for AppKit-hosted windows, so stop the
     /// polling and drop the view tree here (this also ends any shortcut recording).
     func windowWillClose(_ notification: Notification) {
-        system.stop()
         guard let closing = notification.object as? NSWindow, closing === window else { return }
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated {
-                closing.contentViewController = nil
-                if self?.window === closing { self?.window = nil }
-            }
+        system.stop()
+        // Forget the window now, so a show() right after builds a fresh one; tear the SwiftUI
+        // tree down on the next turn (not while AppKit is still closing the window).
+        window = nil
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated { closing.contentViewController = nil }
         }
     }
 }

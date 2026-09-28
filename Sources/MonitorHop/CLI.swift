@@ -10,8 +10,8 @@ import MonitorHopCore
 @MainActor
 enum CLI {
     enum Command: Equatable {
-        case list, listJSON, focus(Int), move(Int), identify, check, reload, help, version, invalid(String)
-        case loginItem(String), simulateHotkey(String), renderSettings(String)
+        case list, listJSON, focus(Int), move(Int, pid: Int32?), identify, check, reload, help, version, invalid(String)
+        case loginItem(String), simulateHotkey(String), renderSettings(String), setFrame([String])
     }
 
     static let usage = """
@@ -20,7 +20,7 @@ enum CLI {
     사용법: MonitorHop [명령]
       (명령 없음)        메뉴 막대 앱으로 실행
       --focus N          N번 모니터로 포커스 이동
-      --move N           현재 포커스된 창을 N번 모니터로 보내기
+      --move N [--pid P] 현재 포커스된 창을 N번 모니터로 보내기 (--pid: 그 프로세스가 맨 앞일 때만)
       --list             연결된 모니터를 번호 순서대로 표시
       --list-json        위 정보를 JSON으로 출력 (스크립트용)
       --identify         각 모니터에 번호 표시
@@ -33,6 +33,8 @@ enum CLI {
     개발용:
       --simulate-hotkey focus.N|move.N   실행 중인 앱이 그 단축키를 실제로 누르게 함 (등록된 단축키만)
       --render-settings DIR              설정 화면의 각 탭을 DIR/settings-*.png로 저장
+      --set-frame ID X Y W H             창(CGWindowID)의 위치·크기 지정 (AX 좌표, 테스트 복구용)
+      개발용 명령은 앱을 MONITORHOP_DEVTOOLS=1 환경으로 실행했을 때만 동작합니다.
 
     앱이 실행 중이면 --focus / --move 는 앱에 전달되어 앱의 접근성 권한으로 실행됩니다.
     """
@@ -52,10 +54,17 @@ enum CLI {
         guard let first = args.first else { return nil }
 
         func number() -> Command {
-            guard args.count == 2, let n = Int(args[1]), n >= 1 else {
+            guard args.count >= 2, let n = Int(args[1]), n >= 1 else {
                 return .invalid("\(first) 뒤에 1 이상의 모니터 번호 하나가 필요합니다.")
             }
-            return first == "--focus" ? .focus(n) : .move(n)
+            if first == "--focus" {
+                return args.count == 2 ? .focus(n) : .invalid("--focus에는 모니터 번호만 필요합니다.")
+            }
+            if args.count == 2 { return .move(n, pid: nil) }
+            guard args.count == 4, args[2] == "--pid", let pid = Int32(args[3]), pid > 0 else {
+                return .invalid("사용법: --move N [--pid P]")
+            }
+            return .move(n, pid: pid)
         }
         func single(_ command: Command) -> Command {
             args.count == 1 ? command : .invalid("\(first)에는 추가 인자가 필요 없습니다: \(args.dropFirst().joined(separator: " "))")
@@ -77,6 +86,11 @@ enum CLI {
                 return .invalid("--simulate-hotkey 뒤에 focus.N 또는 move.N이 필요합니다.")
             }
             return .simulateHotkey(args[1])
+        case "--set-frame":
+            guard args.count == 6, args.dropFirst().allSatisfy({ Double($0) != nil }) else {
+                return .invalid("--set-frame 뒤에 창 ID와 X Y W H가 필요합니다.")
+            }
+            return .setFrame(Array(args.dropFirst()))
         case "--render-settings":
             guard args.count == 2 else { return .invalid("--render-settings 뒤에 저장할 폴더가 필요합니다.") }
             return .renderSettings(args[1])
@@ -104,12 +118,14 @@ enum CLI {
             let key = command == .list ? "list" : command == .listJSON ? "list-json" : "check"
             if InstanceLock.isHeldByAnotherProcess {
                 // The running app renders it, so the numbers are exactly the ones it uses.
-                guard let text = RemoteControl.render(key) else {
-                    FileHandle.standardError.write(Data("실패: 실행 중인 MonitorHop 앱이 응답하지 않습니다.\n".utf8))
+                switch RemoteControl.render(key) {
+                case .success(let text):
+                    print(text)
+                    return 0
+                case .failure(let error):
+                    FileHandle.standardError.write(Data("실패: \(error.message)\n".utf8))
                     return 1
                 }
-                print(text)
-                return 0
             }
             // Without NSApplication, NSScreen.visibleFrame ignores the menu bar on secondary displays.
             _ = NSApplication.shared
@@ -128,8 +144,8 @@ enum CLI {
             return 0
         case .focus(let n):
             return runAction(ActionID(.focus, n))
-        case .move(let n):
-            return runAction(ActionID(.move, n))
+        case .move(let n, let pid):
+            return runAction(ActionID(.move, n), requiredFrontPID: pid)
         case .loginItem(let mode):
             if mode != "status" {
                 do {
@@ -156,6 +172,12 @@ enum CLI {
                 return 1
             }
             return report(RemoteControl.pressShortcut(of: action))
+        case .setFrame(let spec):
+            guard InstanceLock.isHeldByAnotherProcess else {
+                FileHandle.standardError.write(Data("실패: MonitorHop 앱이 실행 중이어야 합니다.\n".utf8))
+                return 1
+            }
+            return report(RemoteControl.setFrame(spec))
         case .renderSettings(let path):
             let app = NSApplication.shared
             app.setActivationPolicy(.accessory)
@@ -172,26 +194,33 @@ enum CLI {
         }
     }
 
-    private static func runAction(_ action: ActionID) -> Int32 {
+    private static func runAction(_ action: ActionID, requiredFrontPID: pid_t? = nil) -> Int32 {
         if InstanceLock.isHeldByAnotherProcess {
-            guard let outcome = RemoteControl.perform(action) else {
-                FileHandle.standardError.write(Data("실패: 실행 중인 MonitorHop 앱이 응답하지 않습니다.\n".utf8))
-                return 1
-            }
-            return report(outcome)
+            return report(RemoteControl.perform(action, requiredFrontPID: requiredFrontPID))
         }
         // No app running: do it here (Accessibility is judged for this process's parent app).
         _ = NSApplication.shared // accurate visible frames, HUD available
         ScreenRegistry.shared.refresh()
-        let outcome = ActionPerformer.shared.perform(action)
+        let outcome = ActionPerformer.shared.perform(action, requiredFrontPID: requiredFrontPID)
         let code = report(outcome)
-        spin(0.6) // let the focus check run before exiting
+        // Success: let the 150/300/500 ms focus check run. Failure: keep the error HUD readable.
+        spin(outcome.isSuccess ? 0.6 : 2.5)
         return code
     }
 
     private static func report(_ outcome: ActionOutcome) -> Int32 {
         print(outcome.isSuccess ? outcome.message : "실패: \(outcome.message)")
         return outcome.isSuccess ? 0 : 1
+    }
+
+    private static func report(_ result: Result<ActionOutcome, RemoteControl.SendError>) -> Int32 {
+        switch result {
+        case .success(let outcome):
+            return report(outcome)
+        case .failure(let error):
+            FileHandle.standardError.write(Data("실패: \(error.message)\n".utf8))
+            return 1
+        }
     }
 
     private static func spin(_ seconds: TimeInterval) {
@@ -240,7 +269,18 @@ enum CLI {
             "customOrder": SettingsStore.shared.config.hasCustomDisplayOrder,
             "monitors": monitors,
         ]
-        if insideApp { payload["appTrusted"] = AccessibilityPermission.isTrusted }
+        if insideApp {
+            // Identity of the running app, so scripts can tell which build answered.
+            payload["appTrusted"] = AccessibilityPermission.isTrusted
+            payload["pid"] = Int(getpid())
+            payload["bundlePath"] = Bundle.main.bundlePath
+            payload["build"] = AppInfo.build
+            payload["devTools"] = DevTools.isEnabled
+            if let url = Bundle.main.executableURL,
+               let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
+                payload["executableMTime"] = date.timeIntervalSince1970
+            }
+        }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
               let text = String(data: data, encoding: .utf8) else { return "{}" }
         return text

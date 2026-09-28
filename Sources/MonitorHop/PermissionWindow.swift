@@ -108,6 +108,7 @@ final class PermissionWindowController: NSObject, NSWindowDelegate {
             }
         }
         model.startPolling()
+        if let window, !window.isVisible { window.center() } // may have been moved aside earlier
         AppActivator.bringToFront(pid: getpid())
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)

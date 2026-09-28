@@ -11,6 +11,9 @@ MainActor.assumeIsolated {
         RemoteControl.requestShowSettings()
         exit(0)
     }
+    // Listen before anything else so requests sent while we start up are not dropped
+    // (they are queued until applicationDidFinishLaunching calls markReady()).
+    RemoteControl.startListening()
 
     let app = NSApplication.shared
     let delegate = AppDelegate()

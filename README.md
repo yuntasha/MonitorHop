@@ -57,16 +57,19 @@ make install        # 빌드 → /Applications/MonitorHop.app 복사 → 실행
 MH=/Applications/MonitorHop.app/Contents/MacOS/MonitorHop
 $MH --focus 2       # 2번 모니터로 포커스
 $MH --move 1        # 현재 창을 1번 모니터로
+$MH --move 1 --pid 1234   # PID 1234 앱이 맨 앞일 때만 옮김 (다른 앱 창을 실수로 옮기지 않게)
 $MH --list          # 모니터 목록(번호 순)과 각 모니터의 맨 앞 창
 $MH --list-json     # 같은 정보를 JSON으로
 $MH --identify      # 모니터 번호 오버레이
 $MH --check         # 권한 · API · 단축키 진단
 $MH --reload        # defaults로 설정을 직접 바꾼 뒤 앱이 다시 읽게 함
+$MH --login-item on # 로그인 시 자동 실행 켜기 (off / status)
 ```
 
 MonitorHop 앱이 실행 중이면 명령은 **앱으로 전달되어 앱의 접근성 권한으로** 실행됩니다.
 그래서 터미널이나 skhd에 따로 권한을 줄 필요가 없습니다. 앱이 꺼져 있으면 CLI가 직접 실행하며,
 이때는 호출한 앱(터미널 등)의 권한 기준입니다. 성공하면 종료 코드 0, 실패하면 1, 잘못된 인자는 2입니다.
+MonitorHop 메뉴가 열려 있는 동안에는 macOS가 전달을 미루므로 명령이 실패로 끝나며, 나중에 뒤늦게 실행되지 않습니다.
 
 ## 개발
 
@@ -76,8 +79,22 @@ make test           # 단위 테스트 (Swift Testing, 46개)
 make app            # build/MonitorHop.app 조립 + 서명
 make run            # build/ 의 앱 실행
 make check          # 진단 출력
-scripts/integration-test.py   # 실제 창을 띄워 포커스/이동을 끝까지 검증 (모니터 2대 + 앱 권한 필요, 24개 항목)
+scripts/integration-test.py   # 실제 창으로 포커스·이동·실제 단축키를 끝까지 검증 (모니터 2대 + 앱 권한 필요, 26개 항목)
 ```
+
+`make app`은 build/ 의 앱이 실행 중이면 새 빌드로 자동 재시작합니다.
+통합 테스트는 build/ 의 최신 앱을 개발 모드(`MONITORHOP_DEVTOOLS=1`)로 띄워 검사하고, 끝나면 원래 실행 중이던 앱을 다시 켭니다.
+테스트가 옮기는 창은 항상 테스트용 창뿐입니다 (`--move … --pid`).
+
+개발용 명령 (앱을 `open --env MONITORHOP_DEVTOOLS=1 build/MonitorHop.app`으로 실행했을 때만 동작):
+
+```bash
+$MH --simulate-hotkey focus.2      # 앱이 자기 단축키를 실제로 눌러 봄 (창 서버 → Carbon → 동작)
+$MH --render-settings /tmp/shots   # 설정 창 각 탭과 HUD를 PNG로 저장 (화면 점검용)
+$MH --set-frame ID X Y W H         # 창 위치·크기 지정 (테스트 복구용)
+```
+
+CI(GitHub Actions, macOS 15)는 푸시마다 빌드 · 단위 테스트 · 앱 조립 · CLI 확인을 실행합니다.
 
 ### 서명과 접근성 권한
 
@@ -128,5 +145,5 @@ Sources/MonitorHop/       앱
 ## 제거
 
 ```bash
-make uninstall      # 앱, 설정, 접근성 권한 항목 삭제
+make uninstall      # 로그인 항목 해제, 접근성 권한 항목 · 설정 · 앱 삭제
 ```

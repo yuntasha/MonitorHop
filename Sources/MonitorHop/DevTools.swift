@@ -5,11 +5,18 @@ import MonitorHopCore
 /// Developer / automation helpers used by the integration test and for visual QA.
 @MainActor
 enum DevTools {
+    /// Developer tools must be enabled explicitly when the app is launched:
+    /// `open --env MONITORHOP_DEVTOOLS=1 MonitorHop.app` (the integration test does this).
+    static var isEnabled: Bool { ProcessInfo.processInfo.environment["MONITORHOP_DEVTOOLS"] == "1" }
+
     /// Posts the key events of `action`'s bound shortcut, so the real hotkey path
-    /// (window server → Carbon hotkey → action) runs. Only shortcuts MonitorHop has registered
-    /// can be pressed, so this cannot be used to type arbitrary keys into other apps.
+    /// (window server → Carbon hotkey → action) runs. Only valid shortcuts MonitorHop has
+    /// registered can be pressed, and only with developer tools enabled.
     static func pressShortcut(of action: ActionID) -> ActionOutcome {
-        guard let shortcut = SettingsStore.shared.config.shortcut(for: action) else {
+        guard isEnabled else {
+            return .failed("개발용 기능이 꺼져 있습니다. MONITORHOP_DEVTOOLS=1 환경으로 앱을 실행하세요.")
+        }
+        guard let shortcut = SettingsStore.shared.config.shortcut(for: action), shortcut.validation == .valid else {
             return .failed("\(action.title)에 지정된 단축키가 없습니다.")
         }
         let hotkeys = HotkeyCenter.shared
@@ -32,6 +39,18 @@ enum DevTools {
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
         return .done("\(shortcut.displayString(keyName: KeyNames.name(for:))) 입력을 보냈습니다.")
+    }
+
+    /// Sets the frame (AX coordinates) of the on-screen window with `windowID`. Used by the
+    /// integration test to put windows back exactly where they were. Developer tools only.
+    static func setFrame(windowID: CGWindowID, to frame: CGRect) -> ActionOutcome {
+        guard isEnabled else { return .failed("개발용 기능이 꺼져 있습니다.") }
+        guard let info = WindowFinder.visibleWindows().first(where: { $0.windowID == windowID }),
+              let window = AXWindow.windows(of: info.pid).first(where: { $0.windowID == windowID }) else {
+            return .failed("창 \(windowID)을(를) 찾지 못했습니다.")
+        }
+        let result = window.setFrame(frame)
+        return .done("창 \(windowID): \(result.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))×\(Int($0.height))" } ?? "?")")
     }
 
     /// Renders each settings tab to `<directory>/settings-<tab>.png` exactly as the window server

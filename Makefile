@@ -23,7 +23,8 @@ install: app stop ## Copy the app to /Applications and start it
 	cp -R "$(APP)" "$(INSTALL_DIR)/"
 	open "$(INSTALL_DIR)/MonitorHop.app"
 
-uninstall: stop   ## Remove the app, its settings and its permission entry
+uninstall: stop   ## Remove the app, its login item, settings and permission entry
+	-@[ -x "$(INSTALL_DIR)/MonitorHop.app/Contents/MacOS/MonitorHop" ] && "$(INSTALL_DIR)/MonitorHop.app/Contents/MacOS/MonitorHop" --login-item off >/dev/null 2>&1 || true
 	-tccutil reset Accessibility $(BUNDLE_ID) || echo "warning: remove MonitorHop manually in System Settings › Privacy & Security › Accessibility"
 	-defaults delete $(BUNDLE_ID)
 	rm -rf "$(INSTALL_DIR)/MonitorHop.app"

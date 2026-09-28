@@ -134,7 +134,8 @@ public struct AppConfig: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = AppConfig.default
         let rawBindings = (try? c.decodeIfPresent([String: Shortcut].self, forKey: .bindings)) ?? nil
-        bindings = (rawBindings ?? d.bindings).filter { ActionID(key: $0.key) != nil }
+        // Unknown actions and shortcuts that break the current rules (e.g. ⌘-only) are dropped.
+        bindings = (rawBindings ?? d.bindings).filter { ActionID(key: $0.key) != nil && $0.value.validation == .valid }
         displayOrder = ((try? c.decodeIfPresent([String].self, forKey: .displayOrder)) ?? nil) ?? d.displayOrder
         displayOrdersByConfiguration = ((try? c.decodeIfPresent([String: [String]].self, forKey: .displayOrdersByConfiguration)) ?? nil)
             ?? d.displayOrdersByConfiguration
