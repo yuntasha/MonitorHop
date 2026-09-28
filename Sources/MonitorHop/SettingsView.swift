@@ -48,28 +48,26 @@ struct ShortcutsSettingsView: View {
     }
 
     var body: some View {
+        let taken = systemShortcuts
         Form {
-            let taken = systemShortcuts
             Section {
+                Text("그 모니터에서 가장 앞에 있는 창을 활성화하고 커서를 옮깁니다.")
+                    .font(.caption).foregroundStyle(.secondary)
                 ForEach(visibleSlots, id: \.self) { slot in
                     ShortcutRow(action: ActionID(.focus, slot), systemShortcuts: taken)
                 }
             } header: {
                 Text("N번 모니터로 포커스 이동")
-            } footer: {
-                Text("그 모니터에서 가장 앞에 있는 창을 활성화하고 커서를 옮깁니다.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {
+                Text("지금 포커스된 창을 그 모니터로 옮깁니다. 배치 방식은 ‘일반’ 탭에서 고릅니다.")
+                    .font(.caption).foregroundStyle(.secondary)
                 ForEach(visibleSlots, id: \.self) { slot in
                     ShortcutRow(action: ActionID(.move, slot), systemShortcuts: taken)
                 }
             } header: {
                 Text("현재 창을 N번 모니터로 보내기")
-            } footer: {
-                Text("지금 포커스된 창을 그 모니터로 옮깁니다. 배치 방식은 ‘일반’ 탭에서 고릅니다.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section {

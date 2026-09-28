@@ -11,6 +11,7 @@ import MonitorHopCore
 enum CLI {
     enum Command: Equatable {
         case list, listJSON, focus(Int), move(Int), identify, check, reload, help, version, invalid(String)
+        case loginItem(String), simulateHotkey(String), renderSettings(String)
     }
 
     static let usage = """
@@ -25,8 +26,13 @@ enum CLI {
       --identify         각 모니터에 번호 표시
       --check            권한·단축키·API 상태 진단
       --reload           실행 중인 앱이 설정을 다시 읽게 함 (defaults로 직접 바꾼 경우)
+      --login-item on|off|status   로그인 시 자동 실행 켜기/끄기/확인
       --version          버전 표시
       --help             이 도움말
+
+    개발용:
+      --simulate-hotkey focus.N|move.N   실행 중인 앱이 그 단축키를 실제로 누르게 함 (등록된 단축키만)
+      --render-settings DIR              설정 화면의 각 탭을 DIR/settings-*.png로 저장
 
     앱이 실행 중이면 --focus / --move 는 앱에 전달되어 앱의 접근성 권한으로 실행됩니다.
     """
@@ -61,6 +67,19 @@ enum CLI {
         case "--identify": return single(.identify)
         case "--check": return single(.check)
         case "--reload": return single(.reload)
+        case "--login-item":
+            guard args.count == 2, ["on", "off", "status"].contains(args[1]) else {
+                return .invalid("--login-item 뒤에 on, off, status 중 하나가 필요합니다.")
+            }
+            return .loginItem(args[1])
+        case "--simulate-hotkey":
+            guard args.count == 2, RemoteControl.parseAction(args[1]) != nil else {
+                return .invalid("--simulate-hotkey 뒤에 focus.N 또는 move.N이 필요합니다.")
+            }
+            return .simulateHotkey(args[1])
+        case "--render-settings":
+            guard args.count == 2 else { return .invalid("--render-settings 뒤에 저장할 폴더가 필요합니다.") }
+            return .renderSettings(args[1])
         case "--help", "-h": return .help
         case "--version", "-v": return .version
         default: return .invalid("알 수 없는 명령: \(args.joined(separator: " "))")
@@ -111,6 +130,39 @@ enum CLI {
             return runAction(ActionID(.focus, n))
         case .move(let n):
             return runAction(ActionID(.move, n))
+        case .loginItem(let mode):
+            if mode != "status" {
+                do {
+                    try LoginItem.setEnabled(mode == "on")
+                } catch {
+                    FileHandle.standardError.write(Data("실패: \(error.localizedDescription)\n".utf8))
+                    return 1
+                }
+            }
+            let status = LoginItem.status
+            let label: String
+            switch status {
+            case .enabled: label = "켜짐"
+            case .requiresApproval: label = "승인 필요 (시스템 설정 › 일반 › 로그인 항목)"
+            case .notRegistered: label = "꺼짐"
+            case .notFound: label = "꺼짐 (등록된 적 없음)"
+            @unknown default: label = "알 수 없음 (\(status.rawValue))"
+            }
+            print("로그인 시 실행: \(label)")
+            return 0
+        case .simulateHotkey(let key):
+            guard InstanceLock.isHeldByAnotherProcess, let action = RemoteControl.parseAction(key) else {
+                FileHandle.standardError.write(Data("실패: MonitorHop 앱이 실행 중이어야 합니다.\n".utf8))
+                return 1
+            }
+            return report(RemoteControl.pressShortcut(of: action))
+        case .renderSettings(let path):
+            let app = NSApplication.shared
+            app.setActivationPolicy(.accessory)
+            ScreenRegistry.shared.refresh()
+            let files = DevTools.renderSettings(to: URL(fileURLWithPath: path))
+            files.forEach { print($0.path) }
+            return files.isEmpty ? 1 : 0
         case .reload:
             guard InstanceLock.isHeldByAnotherProcess else {
                 print("앱이 실행 중이 아닙니다. 다음 실행 때 설정을 읽습니다.")

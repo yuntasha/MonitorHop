@@ -26,6 +26,8 @@ enum RemoteControl {
                 } else if key == reloadKey {
                     SettingsStore.shared.reloadFromDefaults()
                     outcome = .done("설정을 다시 읽었습니다.")
+                } else if let key, key.hasPrefix(pressPrefix), let action = parseAction(String(key.dropFirst(pressPrefix.count))) {
+                    outcome = DevTools.pressShortcut(of: action)
                 } else if let key, key.hasPrefix(renderPrefix) {
                     ScreenRegistry.shared.refresh()
                     outcome = .done(CLI.render(String(key.dropFirst(renderPrefix.count)), insideApp: true))
@@ -50,6 +52,12 @@ enum RemoteControl {
     private static let identifyKey = "identify"
     private static let reloadKey = "reload"
     private static let renderPrefix = "render:"
+    private static let pressPrefix = "press:"
+
+    /// CLI side: make the running GUI press the bound shortcut of `action` (real hotkey path).
+    static func pressShortcut(of action: ActionID) -> ActionOutcome {
+        send(pressPrefix + action.key) ?? .failed("실행 중인 MonitorHop 앱이 응답하지 않습니다.")
+    }
 
     /// CLI side: output of `--list` / `--list-json` / `--check` rendered by the running GUI.
     static func render(_ key: String) -> String? {

@@ -113,31 +113,43 @@ def centered(size, bounds):
     return [round(bounds[0] + (bounds[2] - w) / 2), round(bounds[1] + (bounds[3] - h) / 2), w, h]
 
 
+CONFIG_KEY = "config.v1"
+
+
 def read_config():
+    """MonitorHop's settings blob (bytes) or None. Only this key is touched: macOS keeps other
+    keys (status item position, …) in the same domain while the app runs."""
     try:
         data = subprocess.run(["defaults", "export", BUNDLE_ID, "-"], check=True, capture_output=True).stdout
-        return plistlib.loads(data)
+        return plistlib.loads(data).get(CONFIG_KEY)
     except subprocess.CalledProcessError:
         return None
 
 
+def write_config_blob(blob):
+    if blob is None:
+        subprocess.run(["defaults", "delete", BUNDLE_ID, CONFIG_KEY], capture_output=True)
+    else:
+        run("defaults", "write", BUNDLE_ID, CONFIG_KEY, "-data", blob.hex())
+
+
 def write_placement(original, mode):
-    config = json.loads(original["config.v1"]) if original and "config.v1" in original else {}
+    config = json.loads(original) if original else {}
     config["placement"] = mode
     config["moveCursor"] = True
-    blob = json.dumps(config).encode()
-    run("defaults", "write", BUNDLE_ID, "config.v1", "-data", blob.hex())
+    write_config_blob(json.dumps(config).encode())
     mh("--reload")
 
 
 def restore_config(original):
-    if original is None:
-        subprocess.run(["defaults", "delete", BUNDLE_ID], capture_output=True)
+    for attempt in range(3):
+        write_config_blob(original)
+        time.sleep(0.3)
+        if read_config() == original:
+            break
+        print(f"  warn  settings not restored yet (attempt {attempt + 1}), retrying")
     else:
-        path = os.path.join(WORK, "restore.plist")
-        with open(path, "wb") as f:
-            plistlib.dump(original, f)
-        run("defaults", "import", BUNDLE_ID, path)
+        print("  WARN  could not restore MonitorHop settings; check 설정 › 일반")
     mh("--reload")
 
 
@@ -200,6 +212,17 @@ def main():
             focus_and_check(n, monitor)
         print(f"  info  window-level switches inside the test app: {same_app_switches}"
               + ("" if same_app_switches else " (Stage Manager kept only one test window on stage)"))
+        print("\n[real hotkeys]")
+        # The app presses its own registered shortcut: window server → Carbon hotkey → action.
+        for n, monitor in ((1, m1), (2, m2)):
+            expected = json.loads(run(os.path.join(TOOLS, "hoptool"), "front", *map(str, monitor["axFrame"])))
+            out = mh("--simulate-hotkey", f"focus.{n}")
+            s, st = window_status(0.8), hop_state()
+            ok = bool(expected) and st["frontmostPID"] == expected["pid"]
+            if ok and expected["pid"] == s["pid"]:
+                ok = s["ids"].get(s["key"], -1) == expected["id"]
+            check(f"hotkey focus.{n} → front window on monitor {n}", ok, f"{out.strip()} / expected {expected} / {s}")
+
         s = window_status()
         if s["key"] != "HopA":
             # Make sure HopA is the focused window for the move tests.
