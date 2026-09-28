@@ -5,3 +5,5 @@ build/
 xcuserdata/
 .DS_Store
 .signing/
+__pycache__/
+*.pyc

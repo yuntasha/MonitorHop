@@ -87,6 +87,10 @@ def app_under_test_running(info):
     return same_bundle and fresh and info.get("devTools", False)
 
 
+def running_pids():
+    return subprocess.run(["pgrep", "-x", "MonitorHop"], capture_output=True, text=True).stdout.split()
+
+
 def running_bundles():
     """Bundle paths of running MonitorHop processes, read from the process table."""
     bundles = []
@@ -120,11 +124,15 @@ def ensure_app_running():
     previous = running_bundles()
     _restore["previous"] = previous
     atexit.register(restore_app)
-    if previous:
+    # Decide from the whole process table: an unbundled instance (swift run, .build/…/MonitorHop)
+    # also holds the single-instance lock. Only .app bundles can be relaunched afterwards.
+    if subprocess.run(["pgrep", "-x", "MonitorHop"], capture_output=True).returncode == 0:
+        if len(previous) < len(running_pids()):
+            print("  note  stopping a MonitorHop that runs outside an .app bundle; it is not relaunched afterwards")
         subprocess.run(["pkill", "-x", "MonitorHop"])
         for _ in range(50):
             time.sleep(0.1)
-            if not running_bundles():
+            if not running_pids():
                 break
     _restore["launched"] = True
     # Dev tools (--simulate-hotkey) are opt-in per launch.
