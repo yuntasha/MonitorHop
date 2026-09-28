@@ -36,11 +36,26 @@ struct ShortcutTests {
         #expect(Shortcut(keyCode: a, modifiers: []).validation == .needsModifier)
         #expect(Shortcut(keyCode: a, modifiers: [.shift]).validation == .needsModifier)
         #expect(Shortcut(keyCode: a, modifiers: [.control]).validation == .valid)
-        #expect(Shortcut(keyCode: a, modifiers: [.option, .shift]).validation == .valid)
+        #expect(Shortcut(keyCode: a, modifiers: [.control, .shift]).validation == .valid)
+        #expect(Shortcut(keyCode: a, modifiers: [.option, .command]).validation == .valid)
+        // ⌘-only combos would steal ⌘W/⌘Q/…; ⌥-only combos steal special characters.
+        #expect(Shortcut(keyCode: 0x0D, modifiers: [.command]).validation == .needsModifier)          // ⌘W
+        #expect(Shortcut(keyCode: a, modifiers: [.command, .shift]).validation == .needsModifier)
+        #expect(Shortcut(keyCode: a, modifiers: [.option]).validation == .needsModifier)
+        #expect(Shortcut(keyCode: a, modifiers: [.option, .shift]).validation == .needsModifier)
         #expect(Shortcut(keyCode: 0x60, modifiers: []).validation == .valid) // F5
+        #expect(Shortcut(keyCode: 0x60, modifiers: [.command]).validation == .valid)
         #expect(Shortcut(keyCode: KeyCodes.escape, modifiers: []).validation == .reserved)
         #expect(Shortcut(keyCode: KeyCodes.delete, modifiers: []).validation == .reserved)
-        #expect(Shortcut(keyCode: KeyCodes.escape, modifiers: [.command]).validation == .valid)
+        #expect(Shortcut(keyCode: KeyCodes.escape, modifiers: [.control]).validation == .valid)
+    }
+
+    @Test func specialKeysHaveVisibleNames() {
+        for code: UInt32 in [0x72, 0x6E, 0x66, 0x68, 0x7B, 0x31] {
+            let name = KeyCodes.fixedName(code)
+            #expect(name != nil)
+            #expect(name?.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F } == true)
+        }
     }
 
     @Test func digitKeyCodes() {

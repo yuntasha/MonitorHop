@@ -46,6 +46,11 @@ final class ShortcutRecorderButton: NSButton {
         isRecording ? stopRecording() : startRecording()
     }
 
+    /// Stops whichever recorder is currently recording (e.g. before clearing or resetting).
+    static func cancelActive() {
+        active?.stopRecording()
+    }
+
     func startRecording() {
         guard !isRecording else { return }
         Self.active?.stopRecording()
@@ -111,7 +116,7 @@ final class ShortcutRecorderButton: NSButton {
             onChange?(candidate)
         case .needsModifier, .reserved:
             NSSound.beep()
-            onMessage?("⌘ · ⌃ · ⌥ 중 하나 이상과 함께 눌러 주세요. (F1–F20은 단독 사용 가능)")
+            onMessage?(Shortcut.validationHint)
         }
         return nil
     }
@@ -148,7 +153,9 @@ struct ShortcutRecorder: NSViewRepresentable {
     func updateNSView(_ button: ShortcutRecorderButton, context: Context) {
         button.onChange = onChange
         button.onMessage = onMessage
-        if !button.isRecording { button.shortcut = shortcut }
+        // Always take the model value (refresh() still shows the recording prompt while recording),
+        // so a change made elsewhere during recording (ⓧ, reset) is not lost.
+        button.shortcut = shortcut
     }
 
     static func dismantleNSView(_ button: ShortcutRecorderButton, coordinator: ()) {

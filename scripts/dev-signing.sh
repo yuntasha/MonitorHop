@@ -73,24 +73,34 @@ CNF
 }
 
 sign() {
-    local hash password original
+    local hash password k
     hash="$(ensure)"
     password="$(cat "$PASSWORD_FILE")"
     security unlock-keychain -p "$password" "$KEYCHAIN"
+
     # codesign only finds private keys in keychains on the search list: add ours temporarily.
-    original="$(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')"
-    restore() {
-        # shellcheck disable=SC2086
-        eval security list-keychains -d user -s $(printf '%q ' $original)
-    }
-    trap restore EXIT
-    # shellcheck disable=SC2086
-    eval security list-keychains -d user -s $(printf '%q ' $original) "$(printf '%q' "$KEYCHAIN")"
+    # Keep the list in an array (paths may contain spaces) and never write an empty list.
+    ORIGINAL_KEYCHAINS=()
+    while IFS= read -r k; do
+        k="${k#"${k%%[![:space:]]*}"}"   # trim leading whitespace
+        k="${k#\"}"; k="${k%\"}"           # strip quotes
+        [ -n "$k" ] && [ "$k" != "$KEYCHAIN" ] && ORIGINAL_KEYCHAINS+=("$k")
+    done < <(security list-keychains -d user)
+    if [ ${#ORIGINAL_KEYCHAINS[@]} -eq 0 ]; then
+        echo "error: the user keychain search list is empty; not modifying it" >&2
+        return 1
+    fi
+    trap restore_keychains EXIT
+    security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" "$KEYCHAIN"
     for path in "$@"; do
         codesign --force --sign "$hash" --identifier "$BUNDLE_ID" "$path"
     done
-    restore
+    restore_keychains
     trap - EXIT
+}
+
+restore_keychains() {
+    security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"
 }
 
 case "${1:-}" in

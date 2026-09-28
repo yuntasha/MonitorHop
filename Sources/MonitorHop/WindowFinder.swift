@@ -22,9 +22,9 @@ enum WindowFinder {
         "com.apple.systemuiserver",
     ]
 
-    /// Visible normal windows of other apps on the current Space, front to back.
-    /// Needs no permission (window titles are not used).
-    static func visibleWindows() -> [WindowInfo] {
+    /// Visible normal windows on the current Space, front to back (other apps only unless
+    /// `includeOwn`). Needs no permission (window titles are not used).
+    static func visibleWindows(includeOwn: Bool = false) -> [WindowInfo] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] else { return [] }
         let ownPID = getpid()
@@ -46,7 +46,7 @@ enum WindowFinder {
         for entry in list {
             guard (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
                   let pid = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  pid != ownPID,
+                  includeOwn || pid != ownPID,
                   let id = (entry[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
                   let boundsDict = entry[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
@@ -56,7 +56,9 @@ enum WindowFinder {
             if stripBounds.contains(where: { Geometry.approximatelyEqual($0, bounds, tolerance: 1) }) { continue }
 
             let allowed: Bool
-            if let cached = allowedByPID[pid] {
+            if pid == ownPID {
+                allowed = true
+            } else if let cached = allowedByPID[pid] {
                 allowed = cached
             } else {
                 allowed = isFocusableApp(pid)

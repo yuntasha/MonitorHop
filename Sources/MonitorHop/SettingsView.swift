@@ -13,6 +13,7 @@ final class SettingsNavigation: ObservableObject {
 
 struct SettingsView: View {
     @ObservedObject var navigation: SettingsNavigation
+    let system: SystemStatusModel
 
     var body: some View {
         TabView(selection: $navigation.tab) {
@@ -22,7 +23,7 @@ struct SettingsView: View {
             MonitorsSettingsView()
                 .tabItem { Label("모니터", systemImage: "display.2") }
                 .tag(SettingsTab.monitors)
-            GeneralSettingsView()
+            GeneralSettingsView(system: system)
                 .tabItem { Label("일반", systemImage: "gearshape") }
                 .tag(SettingsTab.general)
         }
@@ -36,6 +37,8 @@ struct ShortcutsSettingsView: View {
     @ObservedObject private var store = SettingsStore.shared
     @ObservedObject private var registry = ScreenRegistry.shared
     @State private var showAllSlots = false
+    /// Enabled macOS shortcuts, read once per render for the conflict markers.
+    private var systemShortcuts: [(keyCode: UInt32, modifiers: UInt32)] { SystemShortcuts.enabled() }
 
     private var visibleSlots: [Int] {
         if showAllSlots { return Array(AppConfig.slots) }
@@ -46,9 +49,10 @@ struct ShortcutsSettingsView: View {
 
     var body: some View {
         Form {
+            let taken = systemShortcuts
             Section {
                 ForEach(visibleSlots, id: \.self) { slot in
-                    ShortcutRow(action: ActionID(.focus, slot))
+                    ShortcutRow(action: ActionID(.focus, slot), systemShortcuts: taken)
                 }
             } header: {
                 Text("N번 모니터로 포커스 이동")
@@ -59,7 +63,7 @@ struct ShortcutsSettingsView: View {
 
             Section {
                 ForEach(visibleSlots, id: \.self) { slot in
-                    ShortcutRow(action: ActionID(.move, slot))
+                    ShortcutRow(action: ActionID(.move, slot), systemShortcuts: taken)
                 }
             } header: {
                 Text("현재 창을 N번 모니터로 보내기")
@@ -74,7 +78,10 @@ struct ShortcutsSettingsView: View {
                     Text("버튼을 누른 뒤 원하는 키 조합을 입력하세요. Esc는 취소, ⌫는 지우기입니다.")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("기본값으로 복원") { store.resetShortcuts() }
+                    Button("기본값으로 복원") {
+                        ShortcutRecorderButton.cancelActive()
+                        store.resetShortcuts()
+                    }
                 }
             }
         }
@@ -84,10 +91,11 @@ struct ShortcutsSettingsView: View {
 
 struct ShortcutRow: View {
     let action: ActionID
+    let systemShortcuts: [(keyCode: UInt32, modifiers: UInt32)]
     @ObservedObject private var store = SettingsStore.shared
     @ObservedObject private var registry = ScreenRegistry.shared
     @ObservedObject private var hotkeys = HotkeyCenter.shared
-    @State private var message: String?
+    @State private var feedback: ShortcutFeedback?
 
     var body: some View {
         let monitor = registry.monitor(number: action.slot)
@@ -102,19 +110,24 @@ struct ShortcutRow: View {
                         .lineLimit(1)
                 }
                 Spacer()
-                if hotkeys.failures[action] != nil {
+                if let status = hotkeys.failures[action] {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .help("macOS가 이 단축키 등록을 거부했습니다 (오류 \(status)). 다른 조합을 지정하세요.")
+                } else if let shortcut, SystemShortcuts.isTaken(shortcut, in: systemShortcuts) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.yellow)
-                        .help("다른 앱이 이미 이 단축키를 쓰고 있어 등록하지 못했습니다. 다른 조합을 지정하세요.")
+                        .help("macOS 시스템 단축키와 겹칩니다. 시스템 설정 › 키보드 › 키보드 단축키에서 끄거나 다른 조합을 쓰세요.")
                 }
                 ShortcutRecorder(
                     shortcut: shortcut,
-                    onChange: { newValue in message = store.setShortcut(newValue, for: action) },
-                    onMessage: { message = $0 }
+                    onChange: { newValue in feedback = store.setShortcut(newValue, for: action) },
+                    onMessage: { feedback = $0.map { .rejected($0) } }
                 )
                 .frame(width: 150)
                 Button {
-                    message = store.setShortcut(nil, for: action)
+                    ShortcutRecorderButton.cancelActive()
+                    feedback = store.setShortcut(nil, for: action)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
@@ -123,14 +136,17 @@ struct ShortcutRow: View {
                 .disabled(shortcut == nil)
                 .help("단축키 지우기")
             }
-            if let message {
-                Text(message).font(.caption).foregroundStyle(.red)
+            if let feedback {
+                Text(feedback.message)
+                    .font(.caption)
+                    .foregroundStyle(feedback.isError ? Color.red : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .task(id: message) {
-            guard message != nil else { return }
-            try? await Task.sleep(nanoseconds: 4_000_000_000)
-            message = nil
+        .task(id: feedback) {
+            guard feedback != nil else { return }
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            feedback = nil
         }
     }
 }
@@ -247,9 +263,13 @@ struct MonitorRow: View {
 @MainActor
 final class SystemStatusModel: ObservableObject {
     @Published var trusted = AccessibilityPermission.isTrusted
-    @Published var loginEnabled = LoginItem.isEnabled
-    @Published var loginNote: String? = LoginItem.note
+    @Published var loginStatus = LoginItem.status
+    /// Error from the last register/unregister attempt; cleared when the status changes.
+    @Published var loginError: String?
     private var poll: Task<Void, Never>?
+
+    var loginEnabled: Bool { loginStatus == .enabled }
+    var loginNote: String? { loginError ?? LoginItem.note(for: loginStatus) }
 
     func start() {
         refresh()
@@ -257,7 +277,7 @@ final class SystemStatusModel: ObservableObject {
         poll = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
-                guard let self else { return }
+                guard let self, !Task.isCancelled else { return }
                 self.refresh()
             }
         }
@@ -271,24 +291,27 @@ final class SystemStatusModel: ObservableObject {
     func refresh() {
         let trustedNow = AccessibilityPermission.isTrusted
         if trustedNow != trusted { trusted = trustedNow }
-        let loginNow = LoginItem.isEnabled
-        if loginNow != loginEnabled { loginEnabled = loginNow }
+        let statusNow = LoginItem.status
+        if statusNow != loginStatus {
+            loginStatus = statusNow
+            loginError = nil
+        }
     }
 
     func setLogin(_ enabled: Bool) {
         do {
             try LoginItem.setEnabled(enabled)
-            loginNote = LoginItem.note
+            loginError = nil
         } catch {
-            loginNote = "변경하지 못했습니다: \(error.localizedDescription)"
+            loginError = "변경하지 못했습니다: \(error.localizedDescription)"
         }
-        loginEnabled = LoginItem.isEnabled
+        loginStatus = LoginItem.status
     }
 }
 
 struct GeneralSettingsView: View {
     @ObservedObject private var store = SettingsStore.shared
-    @StateObject private var system = SystemStatusModel()
+    @ObservedObject var system: SystemStatusModel
     @State private var confirmReset = false
 
     var body: some View {
@@ -319,7 +342,7 @@ struct GeneralSettingsView: View {
                     HStack {
                         Text(note).font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        if LoginItem.status == .requiresApproval {
+                        if system.loginStatus == .requiresApproval {
                             Button("로그인 항목 열기") { LoginItem.openSystemSettings() }
                         }
                     }
@@ -346,8 +369,7 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { system.start() }
-        .onDisappear { system.stop() }
+        .onAppear { system.refresh() }
         .alert("모든 설정을 초기화할까요?", isPresented: $confirmReset) {
             Button("초기화", role: .destructive) { store.resetAll() }
             Button("취소", role: .cancel) {}
@@ -372,11 +394,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
     private let navigation = SettingsNavigation()
+    private let system = SystemStatusModel()
 
     func show(tab: SettingsTab? = nil) {
         if let tab { navigation.tab = tab }
         if window == nil {
-            let hosting = NSHostingController(rootView: SettingsView(navigation: navigation))
+            // A fresh SwiftUI tree per opening: closing tears it down (see windowWillClose).
+            let hosting = NSHostingController(rootView: SettingsView(navigation: navigation, system: system))
             let window = NSWindow(contentViewController: hosting)
             window.title = "MonitorHop 설정"
             window.styleMask = [.titled, .closable, .miniaturizable]
@@ -386,7 +410,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             self.window = window
         }
         ScreenRegistry.shared.refresh()
+        system.start()
+        // A menu bar app is never the active app when this runs from a hotkey or a remote
+        // request; SetFrontProcess works from the background where NSApp.activate may not.
+        AppActivator.bringToFront(pid: getpid())
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// SwiftUI does not reliably send onDisappear for AppKit-hosted windows, so stop the
+    /// polling and drop the view tree here (this also ends any shortcut recording).
+    func windowWillClose(_ notification: Notification) {
+        system.stop()
+        guard let closing = notification.object as? NSWindow, closing === window else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                closing.contentViewController = nil
+                if self?.window === closing { self?.window = nil }
+            }
+        }
     }
 }

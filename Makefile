@@ -24,9 +24,10 @@ install: app stop ## Copy the app to /Applications and start it
 	open "$(INSTALL_DIR)/MonitorHop.app"
 
 uninstall: stop   ## Remove the app, its settings and its permission entry
-	rm -rf "$(INSTALL_DIR)/MonitorHop.app"
+	-tccutil reset Accessibility $(BUNDLE_ID) || echo "warning: remove MonitorHop manually in System Settings › Privacy & Security › Accessibility"
 	-defaults delete $(BUNDLE_ID)
-	-tccutil reset Accessibility $(BUNDLE_ID)
+	rm -rf "$(INSTALL_DIR)/MonitorHop.app"
+	rm -rf "$(HOME)/Library/Application Support/MonitorHop"
 
 run: app stop     ## Run the freshly built app from build/
 	open "$(APP)"

@@ -14,7 +14,9 @@ enum LoginItem {
     }
 
     /// Extra explanation for states the user has to act on.
-    static var note: String? {
+    static var note: String? { note(for: status) }
+
+    static func note(for status: SMAppService.Status) -> String? {
         switch status {
         case .requiresApproval:
             return "시스템 설정 › 일반 › 로그인 항목에서 MonitorHop을 허용해 주세요."

@@ -26,6 +26,7 @@ final class HUD {
 
     /// Shows each monitor's number and name on that monitor.
     func identify(_ monitors: [Monitor], duration: TimeInterval = 2.5) {
+        guard NSApp != nil else { return }
         identifyGeneration += 1
         let generation = identifyGeneration
         identifyPanels.forEach { $0.orderOut(nil) }
@@ -53,7 +54,7 @@ final class HUD {
 
     private func show(title: String, subtitle: String?, titleSize: CGFloat, size: NSSize,
                       on monitor: Monitor?, verticalPosition: CGFloat, duration: TimeInterval) {
-        guard let frame = monitor?.frame ?? NSScreen.main?.frame else { return }
+        guard NSApp != nil, let frame = monitor?.frame ?? NSScreen.main?.frame else { return }
         messageGeneration += 1
         let generation = messageGeneration
         let panel = messagePanel ?? Self.makePanel()

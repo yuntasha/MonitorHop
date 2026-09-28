@@ -6,6 +6,12 @@ MainActor.assumeIsolated {
         exit(CLI.run(command))
     }
 
+    // Single GUI instance: a second launch asks the running one to show its settings.
+    guard InstanceLock.acquire() else {
+        RemoteControl.requestShowSettings()
+        exit(0)
+    }
+
     let app = NSApplication.shared
     let delegate = AppDelegate()
     app.delegate = delegate

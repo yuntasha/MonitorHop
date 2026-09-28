@@ -21,6 +21,16 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    /// Re-reads the saved settings (after an external `defaults write`).
+    func reloadFromDefaults() {
+        guard let data = defaults.data(forKey: Self.storageKey),
+              let decoded = try? JSONDecoder().decode(AppConfig.self, from: data) else {
+            if config != .default { config = .default }
+            return
+        }
+        if decoded != config { config = decoded }
+    }
+
     func update(_ change: (inout AppConfig) -> Void) {
         var next = config
         change(&next)
@@ -38,20 +48,22 @@ final class SettingsStore: ObservableObject {
     }
 
     /// Assigns (or clears, with nil) the shortcut of `action`.
-    /// Returns a user-facing error message when the shortcut is rejected.
+    /// Returns feedback for the user: `.rejected` (not assigned) or `.warning` (assigned).
     @discardableResult
-    func setShortcut(_ shortcut: Shortcut?, for action: ActionID) -> String? {
+    func setShortcut(_ shortcut: Shortcut?, for action: ActionID) -> ShortcutFeedback? {
         guard let shortcut else {
             update { $0.bindings[action.key] = nil }
             return nil
         }
-        guard shortcut.validation == .valid else {
-            return "⌘ · ⌃ · ⌥ 중 하나 이상과 함께 눌러 주세요. (F1–F20은 단독 사용 가능)"
-        }
+        guard shortcut.validation == .valid else { return .rejected(Shortcut.validationHint) }
+        let name = shortcut.displayString(keyName: KeyNames.name(for:))
         if let other = config.action(using: shortcut, excluding: action) {
-            return "\(shortcut.displayString(keyName: KeyNames.name(for:)))은(는) 이미 ‘\(other.title)’에 쓰이고 있습니다."
+            return .rejected("\(name)은(는) 이미 ‘\(other.title)’에 쓰이고 있습니다.")
         }
         update { $0.bindings[action.key] = shortcut }
+        if SystemShortcuts.isTaken(shortcut) {
+            return .warning("\(name)은(는) macOS 시스템 단축키와 겹칩니다. 시스템 설정 › 키보드 › 키보드 단축키에서 끄거나 다른 조합을 쓰세요.")
+        }
         return nil
     }
 
@@ -70,6 +82,22 @@ final class SettingsStore: ObservableObject {
 
     func resetAll() {
         update { $0 = .default }
+    }
+}
+
+enum ShortcutFeedback: Equatable {
+    case rejected(String)
+    case warning(String)
+
+    var message: String {
+        switch self {
+        case .rejected(let m), .warning(let m): return m
+        }
+    }
+
+    var isError: Bool {
+        if case .rejected = self { return true }
+        return false
     }
 }
 

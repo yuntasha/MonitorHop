@@ -8,12 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if isAnotherInstanceRunning() {
-            logger.info("Another MonitorHop instance is running; exiting")
-            NSApp.terminate(nil)
-            return
-        }
         MainMenu.install()
+        RemoteControl.startListening()
 
         ScreenRegistry.shared.start()
 
@@ -53,12 +49,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openSettings(_ sender: Any?) {
         SettingsWindowController.shared.show()
-    }
-
-    private func isAnotherInstanceRunning() -> Bool {
-        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
-        return NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .contains { $0.processIdentifier != getpid() && !$0.isTerminated }
     }
 }
 

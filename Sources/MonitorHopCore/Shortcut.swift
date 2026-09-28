@@ -80,7 +80,9 @@ public struct Shortcut: Codable, Hashable, Sendable {
 
 public enum ShortcutValidation: Equatable, Sendable {
     case valid
-    /// Plain keys (or only ⇧) would hijack normal typing.
+    /// Needs ⌃, or ⌥ together with ⌘. Plain keys and ⇧ would hijack typing, ⌘-only combos steal
+    /// standard app commands (⌘W, ⌘Q, …) and ⌥-only combos steal special characters (⌥1 = ¡);
+    /// macOS 15 also restricts ⌥ / ⌥⇧-only global hotkeys.
     case needsModifier
     /// Keys that the recorder reserves (Esc cancels, ⌫ clears).
     case reserved
@@ -89,15 +91,18 @@ public enum ShortcutValidation: Equatable, Sendable {
 extension Shortcut {
     public var validation: ShortcutValidation {
         if KeyCodes.isFunctionKey(keyCode) { return .valid }
-        let meaningful: ModifierSet = [.command, .control, .option]
-        if modifiers.intersection(meaningful).isEmpty {
-            if keyCode == KeyCodes.escape || keyCode == KeyCodes.delete || keyCode == KeyCodes.forwardDelete {
-                return .reserved
-            }
-            return .needsModifier
+        if modifiers.isEmpty,
+           keyCode == KeyCodes.escape || keyCode == KeyCodes.delete || keyCode == KeyCodes.forwardDelete {
+            return .reserved
         }
-        return .valid
+        if modifiers.contains(.control) { return .valid }
+        if modifiers.contains(.option) && modifiers.contains(.command) { return .valid }
+        return .needsModifier
     }
+
+    /// User-facing explanation for a rejected shortcut.
+    public static let validationHint =
+        "⌃를 넣거나 ⌥⌘를 함께 눌러 주세요. ⌘만 쓰면 다른 앱의 기본 단축키를, ⌥만 쓰면 특수문자 입력을 가로챕니다. (F1–F20은 단독 사용 가능)"
 }
 
 /// Virtual key codes (Carbon `kVK_*`) and US-ANSI fallback names.
@@ -130,6 +135,7 @@ public enum KeyCodes {
         0x73: "↖", 0x77: "↘", 0x74: "⇞", 0x79: "⇟",
         0x7B: "←", 0x7C: "→", 0x7D: "↓", 0x7E: "↑",
         0x4C: "⌤", 0x47: "⌧",
+        0x72: "Help", 0x6E: "Menu", 0x66: "英数", 0x68: "かな",
     ]
 
     /// US-ANSI key names, used when the current layout cannot be queried.

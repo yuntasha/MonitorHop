@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """End-to-end test of MonitorHop on the real window server.
 
-Runs the MonitorHop CLI through LaunchServices (`open -n -g -W`) so it uses MonitorHop's own
-Accessibility permission, opens two test windows (one per monitor) and verifies:
+Starts build/MonitorHop.app if needed and drives it through its CLI (commands are forwarded to
+the running app, so they use MonitorHop's own Accessibility permission). Opens two test windows
+(one per monitor) and verifies:
   * focus N  -> the right window becomes key and the cursor lands on monitor N
   * move N   -> the focused window moves to monitor N, for every placement mode
 Needs >= 2 monitors and Accessibility permission for MonitorHop. Restores settings and focus afterwards.
@@ -55,12 +56,25 @@ def build_tools():
     return os.path.dirname(app)
 
 
+BIN = os.path.join(APP, "Contents", "MacOS", "MonitorHop")
+
+
 def mh(*args):
-    """Runs a MonitorHop CLI command as its own LaunchServices app and returns stdout."""
-    out = os.path.join(WORK, f"out-{time.time_ns()}.txt")
-    subprocess.run(["open", "-g", "-n", "-W", "--stdout", out, "--stderr", out, APP, "--args", *args], check=True)
-    with open(out) as f:
-        return f.read()
+    """Runs a MonitorHop CLI command (forwarded to the running app) and returns its output."""
+    r = subprocess.run([BIN, *args], capture_output=True, text=True, timeout=30)
+    return r.stdout + r.stderr
+
+
+def ensure_app_running():
+    """Returns True when this test started the app (so it can quit it afterwards)."""
+    if json.loads(mh("--list-json"))["appRunning"]:
+        return False
+    subprocess.run(["open", APP], check=True)
+    for _ in range(50):
+        time.sleep(0.2)
+        if json.loads(mh("--list-json"))["appRunning"]:
+            return True
+    sys.exit("could not start build/MonitorHop.app")
 
 
 def visible_frames():
@@ -113,27 +127,30 @@ def write_placement(original, mode):
     config["moveCursor"] = True
     blob = json.dumps(config).encode()
     run("defaults", "write", BUNDLE_ID, "config.v1", "-data", blob.hex())
+    mh("--reload")
 
 
 def restore_config(original):
     if original is None:
         subprocess.run(["defaults", "delete", BUNDLE_ID], capture_output=True)
-        return
-    path = os.path.join(WORK, "restore.plist")
-    with open(path, "wb") as f:
-        plistlib.dump(original, f)
-    run("defaults", "import", BUNDLE_ID, path)
+    else:
+        path = os.path.join(WORK, "restore.plist")
+        with open(path, "wb") as f:
+            plistlib.dump(original, f)
+        run("defaults", "import", BUNDLE_ID, path)
+    mh("--reload")
 
 
 def main():
     if not os.path.isdir(APP):
         sys.exit("build/MonitorHop.app not found — run `make app` first")
+    started_app = ensure_app_running()
     info = json.loads(mh("--list-json"))
     monitors = info["monitors"]
-    print(f"MonitorHop {info['version']} · monitors: {len(monitors)} · accessibility: {info['trusted']}")
+    print(f"MonitorHop {info['version']} · monitors: {len(monitors)} · app accessibility: {info.get('appTrusted')}")
     if len(monitors) < 2:
         sys.exit("SKIP: needs at least two monitors")
-    if not info["trusted"]:
+    if not info.get("appTrusted"):
         sys.exit("SKIP: MonitorHop has no Accessibility permission (grant it, then re-run)")
 
     m1, m2 = monitors[0], monitors[1]
@@ -250,6 +267,8 @@ def main():
     finally:
         subprocess.run(["pkill", "-f", "MonitorHopTestWindow.app/Contents/MacOS/MonitorHopTestWindow"])
         restore_config(original_config)
+        if started_app:
+            subprocess.run(["pkill", "-x", "MonitorHop"])
         if original_front:
             subprocess.run([os.path.join(TOOLS, "hoptool"), "activate", original_front])
 

@@ -68,8 +68,10 @@ struct PermissionView: View {
                 } else {
                     Button("나중에", action: close)
                     Button("시스템 설정 열기") {
+                        // Registers MonitorHop in the list (again, after a reset), then opens it.
                         AccessibilityPermission.request()
                         AccessibilityPermission.openSystemSettings()
+                        PermissionWindowController.shared.moveAside()
                     }
                     .keyboardShortcut(.defaultAction)
                 }
@@ -95,8 +97,8 @@ final class PermissionWindowController: NSObject, NSWindowDelegate {
             window.title = "MonitorHop"
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
-            window.level = .floating
             window.delegate = self
+            window.center()
             self.window = window
         }
         model.onGranted = { [weak self] in
@@ -106,13 +108,20 @@ final class PermissionWindowController: NSObject, NSWindowDelegate {
             }
         }
         model.startPolling()
-        window?.center()
+        AppActivator.bringToFront(pid: getpid())
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
 
     func close() {
         window?.close()
+    }
+
+    /// Moves the window to the top-right corner so it does not cover the System Settings list
+    /// (it keeps polling and closes itself once permission is granted).
+    func moveAside() {
+        guard let window, let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+        window.setFrameTopLeftPoint(NSPoint(x: visible.maxX - window.frame.width - 20, y: visible.maxY - 20))
     }
 
     func windowWillClose(_ notification: Notification) {

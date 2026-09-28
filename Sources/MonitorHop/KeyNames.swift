@@ -35,6 +35,10 @@ enum KeyNames {
         let string = String(utf16CodeUnits: chars, count: length)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
-        return string.isEmpty ? nil : string
+        // Keys like Help/Insert, Menu or the input-language keys translate to control characters.
+        guard !string.isEmpty, !string.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else {
+            return nil
+        }
+        return string
     }
 }

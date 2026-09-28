@@ -61,7 +61,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         }
         let failures = HotkeyCenter.shared.failures.count
         if failures > 0 {
-            let warn = NSMenuItem(title: "등록 실패한 단축키 \(failures)개…", action: #selector(openShortcutSettings), keyEquivalent: "")
+            let warn = NSMenuItem(title: "macOS가 거부한 단축키 \(failures)개…", action: #selector(openShortcutSettings), keyEquivalent: "")
             warn.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
             warn.target = self
             menu.addItem(warn)
@@ -97,9 +97,8 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func runAction(_ sender: NSMenuItem) {
         guard let key = sender.representedObject as? String else { return }
         // Menu actions keep numbers beyond the bindable range working too.
-        let parts = key.split(separator: ".")
-        guard parts.count == 2, let kind = ActionKind(rawValue: String(parts[0])), let slot = Int(parts[1]) else { return }
-        ActionPerformer.shared.perform(ActionID(kind, slot))
+        guard let action = RemoteControl.parseAction(key) else { return }
+        ActionPerformer.shared.perform(action)
     }
 
     @objc private func identifyMonitors() {
@@ -123,7 +122,8 @@ extension Shortcut {
     /// Key equivalent for displaying the shortcut next to a menu item, when representable.
     var menuKeyEquivalent: (String, NSEvent.ModifierFlags)? {
         guard !KeyCodes.isKeypad(keyCode), let name = KeyNames.name(for: keyCode), name.count == 1,
-              let scalar = name.unicodeScalars.first, scalar.isASCII else { return nil }
+              let scalar = name.unicodeScalars.first, scalar.isASCII, scalar.value >= 0x20, scalar.value != 0x7F
+        else { return nil }
         return (name.lowercased(), NSEvent.ModifierFlags(rawValue: modifiers.cocoaFlags))
     }
 }
